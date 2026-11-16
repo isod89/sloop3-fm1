@@ -18,7 +18,7 @@ els.log = el(); els.log.appendChild = d => logs.push(d.textContent);
 const navigator = { language: 'en' };
 let sent = [];
 const out = { send: d => sent.push(d) };
-const ctx = new Function('document', 'navigator', 'out_', 'logs', js + '\n;out = out_; return { vUnpack, vPack, vFrom155, syxVoices, bankRead, bankWrite, F, Y, XB, crc32, set ask(f) { ask = f; } };')(document, navigator, out, logs);
+const ctx = new Function('document', 'navigator', 'out_', 'logs', js + '\n;out = out_; return { vUnpack, vPack, vFrom155, syxVoices, bankRead, bankWrite, findPort, F, Y, XB, crc32, set ask(f) { ask = f; } };')(document, navigator, out, logs);
 let fails = 0; const check = (c, w) => { if (!c) { console.log('FAIL ' + w); fails++; } };
 // 1. pack <-> unpack, every value in range
 for (let n = 0; n < 200; n++) {
@@ -56,6 +56,24 @@ ctx.ask = async (cmd, raw) => {
   if (process.argv[3]) fs.writeFileSync(process.argv[3] + '/fm6.img', flash[0]);
   const s = new Uint8Array(ctx.XB.SYN); for (let i = 16; i < s.length; i++) s[i] = (i * 7) & 127;
   await ctx.bankWrite(1, s); if (process.argv[3]) fs.writeFileSync(process.argv[3] + '/syn.img', flash[1]);
+  // 4. the FM-1's port (issue #2): named "SLOOP 3", or a look-alike that answers INFO (a Mac that has seen SLOOP 2.8
+  // shows SLOOP 3 as "Felucca"); a silent look-alike, MIDI MODE and other gear are passed over
+  const fake = (name, answers) => {
+    const ls = new Set(), sent = [];
+    const i = { name, state: 'connected', open: async () => i, addEventListener: (t, f) => ls.add(f), removeEventListener: (t, f) => ls.delete(f) };
+    const o = { name, state: 'connected', sent, send: d => { sent.push(d); if (answers && d[4] === 1) setTimeout(() => { for (const f of ls) f({ data: [0xF0, 0x7D, 0x53, 0x33, 1, 3, 0xF7] }); }, 5); } };
+    return [o, i];
+  };
+  const access = ports => ({ outputs: new Map(ports.map(([o]) => [o.name, o])), inputs: new Map(ports.map(([, i]) => [i.name, i])) });
+  const synth = fake('Arturia MiniLab mkII', true), silentFw = fake('FM-1', false), mbMode = fake('Felucca Update', true), stale = fake('Felucca', true);
+  let is = await ctx.findPort(access([synth, silentFw, mbMode, stale]));
+  check(is(stale[0]) && !is(silentFw[0]) && !is(mbMode[0]) && !is(synth[0]), 'a look-alike that answers INFO is the FM-1');
+  check(synth[0].sent.length === 0 && mbMode[0].sent.length === 0, 'other gear and MIDI MODE are not asked');
+  const named = fake('FM-1 SLOOP 3', false);
+  is = await ctx.findPort(access([stale, named]));
+  check(is(named[0]) && !is(stale[0]), 'a port named SLOOP 3 is taken as it is');
+  is = await ctx.findPort(access([fake('FM-1', false), fake('Felucca', false)]));
+  check(!is(fake('FM-1')[0]) && !is(fake('Felucca')[0]), 'no FM-1 when no look-alike answers');
   console.log('editor bank test: ' + fails + ' failed');
   process.exit(fails ? 1 : 0);
 })();

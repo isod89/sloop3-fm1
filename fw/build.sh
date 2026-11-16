@@ -56,6 +56,9 @@ python3 tools/mkeditor.py web/editor.html > /dev/null
 cp web/editor.html $O/editor-sloop3.html
 # the page against a simulated m-bootloader: the package it serves, decrypted, is fw.area (tests/install_sim.js)
 node tests/install_sim.js $O/installer-fm1.html $O/fw.area | tail -1
+# ... and on a Mac that has seen SLOOP 2.8 (MIDI MODE as "Felucca Update", issue #2), and with a firmware running
+node tests/install_sim.js $O/installer-fm1.html $O/fw.area "Felucca Update" | tail -1
+node tests/install_sim.js $O/installer-fm1.html $O/fw.area firmware | tail -1
 # the web editor's FM6 bank and SYN kits (tests/editor_test.js)
 node tests/editor_test.js web/editor.html | tail -1
 # the whole editor in Chromium against the PC twin (tests/editor_e2e.js; EDITOR_E2E=0 to skip)

@@ -369,9 +369,9 @@ en: {
   e1: 'Step 1 of 5', e2: 'Step 2 of 5', e3: 'Step 3 of 5', e4: 'Step 4 of 5', e5: 'Step 5 of 5',
   ready: 'Put the FM-1 in MIDI MODE, plug it in, then click Connect.',
   noport: 'No FM-1 in MIDI MODE was found. MIDI devices seen: {n}.',
-  noportFix: 'Check that the FM-1 shows MIDI MODE and that the cable carries data. Try another cable or USB port, without a hub, and close other music apps. This page keeps looking.',
+  noportFix: 'Check that the FM-1 shows MIDI MODE and that the cable carries data. Try another cable or USB port, without a hub, and close other music apps. This page keeps looking. On a Mac, the FM-1 may show under a name macOS gave it before: in Audio MIDI Setup (Window, Show MIDI Studio), rename it FM-1 Update, then quit Chrome completely (Cmd+Q) and open this page again.',
   running: 'The FM-1 is running a firmware, not m-bootloader\'s MIDI MODE.',
-  runningFix: 'Switch it off, then on while holding PLAY, choose MIDI MODE, press PLAY. It is found automatically. No menu? Set up m-bootloader (step 2).',
+  runningFix: 'Switch it off, then on while holding PLAY, choose MIDI MODE, press PLAY. It is found automatically. No menu? Set up m-bootloader (step 2). Already in MIDI MODE on a Mac? Quit Chrome completely (Cmd+Q) and open this page again: Chrome keeps the MIDI names it saw first.',
   found: 'FM-1 found: ', reading: '. Reading the chip key...', notmb: 'This is not m-bootloader answering. Nothing is sent.',
   mb: 'm-bootloader ', stage: ' (RAM stage)', key: ', chip key 0x', badpkg: 'The package does not check out ({e}). Nothing is sent.',
   fwready: 'Connected. SLOOP 3 is ready for this FM-1 ({n} bytes, encrypted for its chip).',
@@ -393,9 +393,9 @@ fr: {
   e1: 'Étape 1 sur 5', e2: 'Étape 2 sur 5', e3: 'Étape 3 sur 5', e4: 'Étape 4 sur 5', e5: 'Étape 5 sur 5',
   ready: 'Mets le FM-1 en MIDI MODE, branche-le, puis clique sur Connecter.',
   noport: 'Aucun FM-1 en MIDI MODE trouvé. Appareils MIDI vus : {n}.',
-  noportFix: 'Vérifie que le FM-1 affiche MIDI MODE et que le câble transporte des données. Essaie un autre câble ou un autre port USB, sans hub, et ferme les autres logiciels de musique. La page continue de chercher.',
+  noportFix: 'Vérifie que le FM-1 affiche MIDI MODE et que le câble transporte des données. Essaie un autre câble ou un autre port USB, sans hub, et ferme les autres logiciels de musique. La page continue de chercher. Sur un Mac, le FM-1 peut garder un nom que macOS lui a donné avant : dans Configuration audio et MIDI (Fenêtre, Afficher le studio MIDI), renomme-le FM-1 Update, puis quitte complètement Chrome (Cmd+Q) et rouvre cette page.',
   running: 'Le FM-1 fait tourner un firmware, pas le MIDI MODE de m-bootloader.',
-  runningFix: 'Éteins-le, puis rallume-le en tenant PLAY, choisis MIDI MODE, appuie sur PLAY. Il sera trouvé tout seul. Pas de menu ? Installe m-bootloader (étape 2).',
+  runningFix: 'Éteins-le, puis rallume-le en tenant PLAY, choisis MIDI MODE, appuie sur PLAY. Il sera trouvé tout seul. Pas de menu ? Installe m-bootloader (étape 2). Déjà en MIDI MODE sur un Mac ? Quitte complètement Chrome (Cmd+Q) et rouvre cette page : Chrome garde les noms MIDI vus en premier.',
   found: 'FM-1 trouvé : ', reading: '. Lecture de la clé de la puce...', notmb: 'Ce n\'est pas m-bootloader qui répond. Rien n\'est envoyé.',
   mb: 'm-bootloader ', stage: ' (en RAM)', key: ', clé de la puce 0x', badpkg: 'Le paquet n\'est pas valide ({e}). Rien n\'est envoyé.',
   fwready: 'Connecté. SLOOP 3 est prêt pour ce FM-1 ({n} octets, chiffrés pour sa puce).',
@@ -610,16 +610,24 @@ function attach(o, i) {
 /* m-bootloader's MIDI MODE: "FM-1 Update" until 2.2; from 2.3 it answers as M-VAVE's update loaders do,
  * "ota-FM-1_900". Each port that may be it is asked who it is (0x12): the one that says MBOOT is used */
 const UPD = /FM-1 Update|ota-FM-1/i;
+/* macOS keeps the name CoreMIDI first gave a USB device (its VID:PID), and Chrome keeps it until it quits: on a Mac
+ * that has seen SLOOP 2.8 or Felucca, MIDI MODE (1209:0002, "FM-1 Update" on USB) shows as "Felucca Update" (issue #2).
+ * So the ports whose name only looks like an FM-1 are asked too, after the ones named for MIDI MODE: a firmware
+ * doesn't answer 0x12 and is passed over */
+const MAYBE = /Update|Felucca|SLOOP|FM-?1/i;
+const rank = n => UPD.test(n) ? 0 : MAYBE.test(n) ? 1 : 2;
 function candidates() {
-  const outs = [...midi.outputs.values()].filter(p => UPD.test(p.name) && p.state !== 'disconnected');
-  const ins = [...midi.inputs.values()].filter(p => UPD.test(p.name) && p.state !== 'disconnected');
-  return outs.map(o => [o, ins.find(i => i.name === o.name) || ins[0]]).filter(x => x[1]);
+  const live = p => p.state !== 'disconnected' && rank(p.name) < 2;
+  const outs = [...midi.outputs.values()].filter(live).sort((a, b) => rank(a.name) - rank(b.name));
+  const ins = [...midi.inputs.values()].filter(live);
+  return outs.map(o => [o, ins.find(i => i.name === o.name) || ins.find(i => rank(i.name) === rank(o.name))]).filter(x => x[1]);
 }
 let probing = false;
 async function tryPort() {
   const cs = candidates();
-  if (!cs.length || probing) return cs.length > 0;
+  if (!cs.length || probing) return cs.length > 0 && rank(cs[0][0].name) === 0;
   probing = true;
+  const was = state;
   for (const [o, i] of cs) {
     attach(o, i);
     state = 'asking'; clearTimeout(hintT); show('err3', false); show('waiting', false); say(T.found + out.name + T.reading);
@@ -628,6 +636,11 @@ async function tryPort() {
     if (state !== 'asking') { probing = false; return true; }          /* (it answered: ready, or refused) */
   }
   probing = false;
+  if (rank(cs[0][0].name) > 0) {                                       /* only look-alikes, none in MIDI MODE: a firmware */
+    if (inp) inp.onmidimessage = null;
+    state = was; show('waiting', was === 'waiting'); const st = $('status'); st.textContent = ''; st.className = 'status';
+    return false;
+  }
   state = 'waiting'; show('waiting', true); problem('err3', T.noans, T.noansFix);
   return true;
 }
