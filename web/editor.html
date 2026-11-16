@@ -2091,11 +2091,35 @@ async function poll() {
   if (out && P2() && !liveBusy && !(typeof document !== 'undefined' && document.hidden)) { try { await live(0); } catch (e) { /* again next time */ } }
   polling = setTimeout(poll, 160);
 }
+/* the FM-1's port: the one named "SLOOP 3", or else one whose name only looks like an FM-1 and answers INFO. macOS
+ * keeps the name CoreMIDI first gave a USB device (VID:PID), and Chrome keeps it until it quits: on a Mac that has
+ * seen SLOOP 2.8, SLOOP 3 (1209:0001, "FM-1 SLOOP 3" on USB) shows as "Felucca" (issue #2) */
+const LOOKS = /SLOOP|Felucca|FM-?1/i, NOT_FW = /Update|ota-FM-1/i;
+function answersInfo(o, i, ms = 800) {
+  return new Promise(res => {
+    let t = 0;
+    const h = e => { const d = e.data; if (d.length > 5 && d[0] === 0xF0 && d[1] === 0x7D && d[2] === 0x53 && d[3] === 0x33 && d[4] === ED.INFO) done(true); };
+    const done = ok => { clearTimeout(t); i.removeEventListener('midimessage', h); res(ok); };
+    t = setTimeout(() => done(false), ms);
+    Promise.resolve(i.open && i.open()).then(() => { i.addEventListener('midimessage', h); o.send(frame(ED.INFO, [])); }, () => done(false));
+  });
+}
+async function findPort(midi) {
+  if ([...midi.outputs.values()].some(p => /SLOOP 3/i.test(p.name))) return p => /SLOOP 3/i.test(p.name);
+  const ins = [...midi.inputs.values()];
+  for (const o of midi.outputs.values()) {
+    if (!LOOKS.test(o.name) || NOT_FW.test(o.name) || o.state === 'disconnected') continue;
+    const i = ins.find(p => p.name === o.name);
+    if (i && await answersInfo(o, i)) return p => p.name === o.name;
+  }
+  return () => false;
+}
 async function connect() {
   try {
     if (!navigator.requestMIDIAccess) { log(L('nomidi'), 'bad'); return; }
     const midi = await navigator.requestMIDIAccess({ sysex: true });
-    const find = () => { out = [...midi.outputs.values()].find(p => /SLOOP 3/i.test(p.name)) || null; inp = [...midi.inputs.values()].find(p => /SLOOP 3/i.test(p.name)) || null; };
+    const is = await findPort(midi);
+    const find = () => { out = [...midi.outputs.values()].find(is) || null; inp = [...midi.inputs.values()].find(is) || null; };
     find();
     if (!out || !inp) { log(L('noport') + [...midi.outputs.values()].map(p => p.name).join(', '), 'bad'); return; }
     inp.onmidimessage = onMsg;

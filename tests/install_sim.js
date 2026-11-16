@@ -2,9 +2,12 @@
  * SLOOP 3's installer page run in node against a fake m-bootloader in MIDI MODE ("FM-1 Update"): who it is (0x12),
  * then the package read with 0x30 requests the way m-bootloader reads it (its header, the entry, flash.bin), the
  * checks it makes, and the area it would write, decrypted with the chip key and compared with build/fw/fw.area. Then a FM-1 running a firmware: the page says to start m-bootloader's menu.
- *   node tests/install_sim.js PAGE.html AREA */
+ *   node tests/install_sim.js PAGE.html AREA [PORT]
+ * PORT: the name the page sees for MIDI MODE (default "ota-FM-1_900"). "Felucca Update" is a Mac that has seen
+ * SLOOP 2.8 (issue #2: CoreMIDI keeps a USB device's first name); a silent look-alike, a firmware, is plugged before
+ * it and must be passed over. "firmware": only that look-alike; the page must say a firmware is running. */
 const fs = require('fs');
-const [page, areaFile] = process.argv.slice(2);
+const [page, areaFile, portName = 'ota-FM-1_900'] = process.argv.slice(2);
 const html = fs.readFileSync(page, 'utf8');
 const js = html.slice(html.indexOf('<script>') + 8, html.lastIndexOf('</script>'));
 const AREA = fs.readFileSync(areaFile);
@@ -97,7 +100,21 @@ async function install() {
     process.exit(fails ? 1 : 0);
   }, 50);
 }
-plug('ota-FM-1_900', mb);                                  /* (m-bootloader 2.3's MIDI MODE answers as M-VAVE's update loaders) */
+const silent = { rx() {} };                                /* a firmware: its name looks like an FM-1, it never answers 0x12 */
+if (portName === 'firmware') {
+  plug('Felucca', silent);
+  (async () => {
+    await els.con.onclick();
+    await new Promise(r => setTimeout(r, 200));
+    check(logs.some(l => /running a firmware/.test(l)), 'the page says a firmware is running: ' + logs.join(' | '));
+    check(!els.waiting.classList.contains('hide') && !els.err3.classList.contains('hide'), 'the page keeps waiting, the problem shown');
+    console.log(fails ? fails + ' FAILED' : 'install_sim: OK (a firmware: passed over, "running a firmware")');
+    process.exit(fails ? 1 : 0);
+  })();
+  return;
+}
+if (portName !== 'ota-FM-1_900') plug('Felucca', silent);
+plug(portName, mb);                                        /* (m-bootloader 2.3's MIDI MODE answers as M-VAVE's update loaders) */
 (async () => {
   await els.con.onclick();
   await new Promise(r => setTimeout(r, 200));
