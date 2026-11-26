@@ -9,6 +9,8 @@
 /* (each tile drawn costs CPU time when TWIN_DRAW_US is set: gfx_finish ends every tile) */
 #define gfx_finish(px, n) (tw_draw_cost(), gfx_finish(px, n))
 #include "../fw/main.c"
+static uint64_t tw_ns_now(void) { return tw_ns; }
+const char *tw_job_name(void) { static char b[96]; snprintf(b, sizeof b, "%s (now %s)", ay_last_job ? ay_last_job : "?", twp_cur); return b; }
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -120,9 +122,16 @@ void twin_end(int code)
     if (tw_spikes) { printf("TWIN: %d halves far costlier than the usual (up to %.0f times)\n", tw_spikes, tw_spike_max); if (!code) code = 74; }
     if (tw_sloop_writes) { printf("TWIN: SLOOP 2.8's data written %d times\n", tw_sloop_writes); if (!code) code = 73; }
     if (tw_wild) { printf("TWIN: %d samples beyond full scale\n", tw_wild); }
+    if (tw_underruns) { printf("TWIN: %u halves made too late (the last played again: a crackle), the last at %.3f s\n", tw_underruns, tw_underrun_at * 1e-9); if (!code && getenv("TWIN_BYTE_NS")) code = 75; }
     printf("TWIN: %.1f s simulated, %d checks, %d failed; flash: %u erases, %u writes; window: %d stale reads; core 2: %u jobs\n",
            tw_s(), tw_checks, tw_fails, tw_erases, tw_writes, tw_stale_reads, cpu1_jobs());
     fflush(stdout);
+    if (getenv("TWIN_PROF")) {                   /* (3.4.3) the main loop's jobs, the worst first */
+        for (int i = 0; i < twp_k; i++) for (int j = i + 1; j < twp_k; j++) if (twp[j].max > twp[i].max) { __typeof__(twp[0]) x = twp[i]; twp[i] = twp[j]; twp[j] = x; }
+        for (int i = 0; i < twp_k; i++) printf("PROF %-18s worst %8.1f us at %8.3f s, mean %7.1f us, %u times, %u over 40 us\n", twp[i].l, twp[i].max * 1e-3, twp[i].at * 1e-9, (double)twp[i].sum / twp[i].n * 1e-3, twp[i].n, twp[i].over);
+        printf("PROF the longest stretch without the sound served: %.1f us at %.3f s, in %s\n", ay_gap_max * 1e-3, ay_gap_at * 1e-9, ay_gap_job ? ay_gap_job : "?");
+        fflush(stdout);
+    }
     tw_denormals();
     _exit(code ? code : tw_fails ? 1 : 0);
 }
@@ -1320,13 +1329,20 @@ static void sc_punch(void)
 static void sc_crumb(void)
 {
     boot_wait();
-    crumb.magic = CRUMB_MAGIC; crumb.fx = PK_ECHO + 1; crumb.blocks = 689u * 200u; crumb_at(W_MIX);
+    crumb.magic = CRUMB_MAGIC; crumb.fx = PK_ECHO + 1; crumb.blocks = 689u * 200u; crumb.load = 97u; crumb.voices = 24u; crumb_at(W_MIX);
     crumb_report(); printf("[%8.3f]    crumb: \"%s\"\n", tw_s(), crash_msg);
-    EXPECT(!strcmp(crash_msg, "RESTART IN MIX/FX · ECHO · 3 MIN"), "the report reads \"%s\"", crash_msg);
+    EXPECT(!strcmp(crash_msg, "RESTART IN MIX/FX · ECHO · 3 MIN · CPU 97% · 24 V · R01"), "the report reads \"%s\"", crash_msg);
+    /* (3.4.4) the longest: still whole */
+    crumb.fx = PK_TAPESTOP + 1; crumb.blocks = 689u * 3540u; crumb.load = 999u; crumb.voices = 99u; crumb_report();
+    { int n = (int)strlen(crash_msg); printf("[%8.3f]    crumb: \"%s\" (%d bytes)\n", tw_s(), crash_msg, n);
+      EXPECT(n < (int)sizeof crash_msg - 1 && strstr(crash_msg, " · R01"), "the longest report cut: \"%s\"", crash_msg); }
+    /* (3.4.4) HOME > SYSTEM shows it, until a power-off */
+    { int was = sticky; splash_on = 0; sticky = PG_TRACKS; wait_ms(100); for (int i = 0; i < 3; i++) { tap(B_GLO); wait_ms(200); } EXPECT(sticky == PG_SYS, "GLO three times: page %d, not SYSTEM", sticky); sticky = PG_SYS; wait_ms(300); EXPECT(W.info == crash_msg, "SYSTEM does not show the last stop (page %d info %s toast %s)", W.page, W.info ? W.info : "-", W.toast ? W.toast : "-"); wait_ms(400); shot("system-crash"); sticky = was; wait_ms(100); }
+    crumb.load = 1000u; crumb.voices = 100u;
     crumb.magic ^= 1u; crumb_report();
     EXPECT(crash_msg[0] == 0, "a crumb without its magic was reported: \"%s\"", crash_msg);
     crumb.magic = CRUMB_MAGIC; crumb.fx = 0; crumb.blocks = 689u * 9u; crumb_at(W_SCREEN); crumb_report();
-    EXPECT(!strcmp(crash_msg, "RESTART IN SCREEN · 9 S"), "the report reads \"%s\"", crash_msg);
+    EXPECT(!strcmp(crash_msg, "RESTART IN SCREEN · 9 S · R01"), "the report reads \"%s\"", crash_msg);
 }
 /* 3.3.2: a value gone wrong in the effects (what a float trap would have turned into a restart): one block silent,
  * the effects cleared, the sound back */
@@ -1437,6 +1453,45 @@ static void sc_saveproj(void)
     turn(ENC_SELECT, 1); wait_ms(200); EXPECT(sticky == PG_PROJ, "PROJECT, SELECT right: left it (%d)", sticky);
     for (int i = 0; i < 4; i++) { tap(B_SAVE); wait_ms(200); EXPECT(sticky == PG_PROJ || sticky == PG_SONG2, "SAVE taps: out of the 3 pages (%d)", sticky); }
 }
+/* (3.4.5, Sam: "the crash on a big track with the PUNCH page and the FX") punch2's hands on the fullest project
+ * (fill_max: every track 128 notes, 128 steps), on the drums' grid and the other pages, the tracks changed under them */
+static void sc_punchbig(void)
+{
+    boot_wait(); wait_ms(800);
+    fill_max(); wait_ms(100);
+    int dr = 0; for (int t = 0; t < NTRK; t++) if (is_drum(t)) { dr = t; break; }
+    trk = dr; sticky = PG_STEPS; page = 0;
+    tap(B_PLAY); wait_ms(800);
+    double secs = getenv("TWIN_SECS") ? atof(getenv("TWIN_SECS")) : 60.0;
+    uint64_t end = tw_ns + (uint64_t)(secs * 1e9); int n = 0;
+    while (tw_ns < end) {
+        int lockit = (int)(tw_rnd() % 3) == 0;
+        if (tw_rnd() % 4 == 0) { trk = (int)(tw_rnd() % NTRK); sticky = (int)(tw_rnd() % 3) == 0 ? PG_STEPS : sticky; page = (int)(tw_rnd() % 8); }
+        press(B_FX);
+        if (lockit) { tap(B_HOME); release(B_FX); }
+        int prev = -1, len = 8 + (int)(tw_rnd() % 40), order = (int)(tw_rnd() % 3);
+        for (int i = 0; i < len; i++) {
+            int k = order == 0 ? i % 27 : order == 1 ? 26 - i % 27 : (int)(tw_rnd() % 27);
+            keydown(k);
+            if (prev >= 0 && prev != k && (tw_rnd() & 1)) keyup(prev);
+            wait_ms(15 + tw_rnd() % (tw_rnd() % 4 ? 120 : 1500));
+            if (prev >= 0 && prev != k) keyup(prev);
+            if (tw_rnd() % 11 == 0) turn(ENC_KNOB1 + (int)(tw_rnd() % 4), tw_rnd() & 1 ? 1 : -1);
+            if (tw_rnd() % 13 == 0) turn(ENC_SELECT, tw_rnd() & 1 ? 1 : -1);
+            prev = k; n++;
+            if (tw_rnd() % 17 == 0) { tw_keys = 0; wait_ms(1 + tw_rnd() % 40); }
+        }
+        tw_keys = 0;
+        if (lockit) tap(B_FX); else release(B_FX);
+        wait_ms(tw_rnd() % 300);
+    }
+    printf("[%8.3f]    punchbig: %d punch-ins\n", tw_s(), n);
+    tw_btn = 0; tw_keys = 0; wait_ms(2000);
+    EXPECT(S.pk.fx < 0 && S.pk.want < 0, "a punch-in stayed on (fx %d, want %d)", S.pk.fx, S.pk.want);
+    EXPECT(S.pk.lend == 0, "the delay's memory was not given back (%d)", S.pk.lend);
+    EXPECT(!S.panics, "the sound panicked (%u)", S.panics);
+    if (Q.playing) tap(B_PLAY);
+}
 /* (4.0.9, issue #6: "crashes when punching 1/4 in the Browser") FX + 1/4 held on every page that browses sounds (SOUNDS
  * from PRESETS, EDIT's last page, SAVE > PRESETS, the drums' kits), playing and stopped; every punch key; PRESETS turned meanwhile */
 static void sc_punchsnd(void)
@@ -1458,6 +1513,89 @@ static void sc_punchsnd(void)
         EXPECT(!S.panics, "pass %d: the sound panicked (%u)", pass, S.panics);
     }
     trk = 0;
+}
+/* (3.4.3, Sam: "the crackle each time I save; and check what else in the menus could crackle") with the FM-1's slow
+ * work priced in simulated time (TWIN_BYTE_NS: each byte of a project written or read; TWIN_HALF_US: each half's
+ * sound): playing, a project saved every way (SAVE + a key held, SAVE twice, HOME + SAVE), the largest project too,
+ * opened, a new one, the pages walked; a half made late (the output playing the last one again) fails it */
+/* (3.4.4) each page's cost, playing a full project (fill_max), the drum track and a synth one: its interface's
+ * work under callgrind (TW_CG: a dump a page, tools: cgcalls.py), the late halves under the cost model */
+#ifdef TW_CG
+#include <valgrind/callgrind.h>
+#else
+#define CALLGRIND_ZERO_STATS
+#define CALLGRIND_DUMP_STATS_AT(x)
+#endif
+static void sc_pagecost(void)
+{
+    boot_wait(); wait_ms(800);
+    fill_max(); wait_ms(100);
+    tap(B_PLAY); wait_ms(1000);
+    int dr = -1, sy = -1; for (int t = 0; t < NTRK; t++) { if (is_drum(t) && dr < 0) dr = t; if (!is_drum(t) && sy < 0) sy = t; }
+    for (int w = 0; w < 2; w++) {
+        int t = w ? sy : dr; if (t < 0) continue;
+        for (int pg = 0; pg < PG_NPG; pg++) {
+            if (pg == PG_PLAY || pg == PG_SND) continue;
+            trk = t; sticky = pg; page = 0; wait_ms(200);
+            uint32_t u = tw_underruns;
+            CALLGRIND_ZERO_STATS; wait_ms(1500);
+            char nm[48]; snprintf(nm, sizeof nm, "%s-%02d-%s", w ? "synth" : "drum", pg, PG_NAME[pg][0] ? PG_NAME[pg] : "?");
+            for (char *c = nm; *c; c++) if (*c == ' ' || *c == '/') *c = '_';
+            CALLGRIND_DUMP_STATS_AT(nm);
+            printf("[%8.3f]    %-24s %u halves late\n", tw_s(), nm, tw_underruns - u);
+        }
+    }
+}
+static void sc_savecrackle(void)
+{
+    boot_wait(); wait_ms(800);
+    if (!getenv("TWIN_BYTE_NS")) printf("[%8.3f]    (TWIN_BYTE_NS not set: the FM-1's slow work is not priced)\n", tw_s());
+    uint32_t u0 = tw_underruns;
+    tap(B_PLAY); wait_ms(1000);
+    for (int k = 0; k < 3; k++) {                                      /* SAVE + a key held 1.5 s: a pattern and the project */
+        seq_step_toggle(&Q, 3, 4 + k, 0, 100); wait_ms(100);
+        press(B_SAVE); wait_ms(200); keydown(white_key[k]); wait_ms(1700); keyup(white_key[k]); wait_ms(100); release(B_SAVE);
+        if (said_since(0, "AGAIN")) { press(B_SAVE); wait_ms(200); keydown(white_key[k]); wait_ms(1700); keyup(white_key[k]); wait_ms(100); release(B_SAVE); }
+        wait_ms(300); wait_saved(8000); wait_ms(300);
+    }
+    printf("[%8.3f]    3 pattern saves while playing: %u halves late\n", tw_s(), tw_underruns - u0);
+    uint32_t u1 = tw_underruns;
+    press(B_HOME); tapkey(white_key[HK_SAVE]); release(B_HOME); wait_ms(300); wait_saved(8000); wait_ms(300);
+    printf("[%8.3f]    HOME + SAVE while playing: %u halves late\n", tw_s(), tw_underruns - u1);
+    uint32_t u2 = tw_underruns;
+    for (int p = 0; p < 40; p++) { tap(p % 3 == 0 ? B_EDIT : p % 3 == 1 ? B_FX : B_SEQ); wait_ms(120); turn(ENC_SELECT, 1); wait_ms(80); turn(ENC_KNOB1 + p % 4, p & 1 ? 1 : -1); wait_ms(80); }
+    tap(B_HOME); wait_ms(300);
+    printf("[%8.3f]    40 pages and knobs while playing: %u halves late\n", tw_s(), tw_underruns - u2);
+    uint32_t u3 = tw_underruns;
+    fill_max(); wait_ms(100);                                           /* (the largest project, its save while it plays) */
+    press(B_HOME); tapkey(white_key[HK_SAVE]); release(B_HOME); wait_ms(300); wait_saved(30000); wait_ms(300);
+    printf("[%8.3f]    the largest project saved while playing: %u halves late\n", tw_s(), tw_underruns - u3);
+    uint32_t u4 = tw_underruns;
+    press(B_HOME); tapkey(white_key[HK_OPEN]); release(B_HOME); wait_ms(200); press(B_HOME); tapkey(white_key[HK_OPEN]); release(B_HOME); wait_ms(1500);
+    printf("[%8.3f]    HOME + OPEN (the largest project) while playing: %u halves late\n", tw_s(), tw_underruns - u4);
+    uint32_t u5 = tw_underruns;
+    tap(B_PLAY); wait_ms(1000);
+    press(B_HOME); tapkey(white_key[HK_NEW]); release(B_HOME); wait_ms(200); press(B_HOME); tapkey(white_key[HK_NEW]); release(B_HOME); wait_ms(1500);
+    printf("[%8.3f]    HOME + NEW while playing: %u halves late\n", tw_s(), tw_underruns - u5);
+    if (Q.playing) { tap(B_PLAY); wait_ms(500); }
+    /* a save while it plays that would have to erase (the bank prepared while stopped, full): it waits for the stop,
+     * no half with the flash off; at the stop, written */
+    if (!Q.playing) tap(B_PLAY);
+    wait_ms(500); EXPECT(Q.playing, "not playing");
+    uint32_t d0 = dark_halves, m = msg_mark(); int waited = 0;
+    for (int k = 0; k < 30 && !waited; k++) {
+        seq_step_toggle(&Q, 3, k % 16, 0, 100); wait_ms(100);
+        press(B_HOME); tapkey(white_key[HK_SAVE]); release(B_HOME); wait_ms(300); wait_saved(8000); wait_ms(200);
+        waited = said_since(m, "SAVED WHEN YOU STOP");
+    }
+    uint32_t dd = dark_halves - d0;
+    printf("[%8.3f]    saves while playing until one must wait: %s, %u halves with the flash off\n", tw_s(), waited ? "it waits" : "never", dd);
+    EXPECT(waited && dd == 0, "a save needing an erase while it plays: waited %d, %u halves with the flash off", waited, dd);
+    uint32_t cn; uint32_t nn = proj_measure(&cn);
+    tap(B_PLAY); wait_ms(500); wait_saved(10000); wait_ms(300);
+    uint32_t at = 0, n1 = 0, c1 = 0; store_proj_find(&at, &n1, &c1);
+    EXPECT(n1 == nn && c1 == cn, "stopped: the save that waited not written (%u %08X, %u %08X)", n1, c1, nn, cn);
+    if (getenv("TWIN_BYTE_NS")) EXPECT(tw_underruns == u0, "%u halves made late (a crackle)", tw_underruns - u0);
 }
 /* (3.4.2, issue #22: "the arpeggiator does not work, the sound goes silent, on track 3") each synth track of a new
  * project, then each of its sounds' kinds, a chord held with ARP on: heard, stopped and playing */
@@ -2610,7 +2748,9 @@ static void sc_oversave(void)
         /* an erase of 300 ms (a slow part's: TWIN_ERASE_MS, host/twin.sh) under way, the window off, and the sound over
          * its time meanwhile (a heavy moment): the load guard's CPU OVERLOAD comes while the window is off */
         while (!flash_xip_on()) wait_ms(1);
-        EXPECT(flash_erase_start(0xE1000u) == 0, "an erase in the staging area refused");   /* (SLOOP 2.8 import staging: erasable) */
+        tw_erase_r = 1; tw_erase_at = 0xE1000u;            /* (started at the main loop's top, as the firmware's: tw_loop_top) */
+        while (tw_erase_at) wait_ms(1);
+        EXPECT(tw_erase_r == 0, "an erase in the staging area refused");   /* (SLOOP 2.8 import staging: erasable) */
         tw_half_us = 6200; wait_ms(200); tw_half_us = 0;
         wait_ms(5500);                                     /* (CPU OVERLOAD said at most every 5 s) */
     }
@@ -2816,7 +2956,7 @@ static const struct { const char *name; void (*fn)(void); } SC[] = {
     { "freetake", sc_freetake }, { "drums285", sc_drums285 }, { "savestutter", sc_savestutter }, { "savepat", sc_savepat }, { "oversave", sc_oversave }, { "recsave", sc_recsave }, { "sections", sc_sections },
     { "boot", sc_boot }, { "reboot", sc_reboot }, { "sounds", sc_sounds }, { "ukit", sc_ukit }, { "pages", sc_pages }, { "record", sc_record },
     { "powercut", sc_powercut }, { "aftercut", sc_after_cut }, { "sample", sc_sample }, { "editor", sc_editor },
-    { "monkey", sc_monkey }, { "import", sc_import }, { "midi", sc_midi }, { "rescue", sc_rescue }, { "calib", sc_calib }, { "settings", sc_settings }, { "play", sc_play }, { "levels", sc_levels }, { "mixui", sc_mixui }, { "fx", sc_fx }, { "editor2", sc_editor2 }, { "serve", sc_serve }, { "vis", sc_vis }, { "banksave", sc_banksave }, { "punch", sc_punch }, { "film", sc_film }, { "inst", sc_inst }, { "lowend", sc_lowend }, { "tour", sc_tour }, { "saveproj", sc_saveproj }, { "selwalk", sc_selwalk }, { "punchsnd", sc_punchsnd }, { "midiimp", sc_midiimp }, { "arpall", sc_arpall }, { "chordrec", sc_chordrec }, { "songeng", sc_songeng }, { "midi2", sc_midi2 }, { "film2", sc_film2 }, { "bigproj", sc_bigproj }, { "bigcut", sc_bigcut }, { "punch2", sc_punch2 }, { "crumb", sc_crumb }, { "nan", sc_nan } };
+    { "monkey", sc_monkey }, { "import", sc_import }, { "midi", sc_midi }, { "rescue", sc_rescue }, { "calib", sc_calib }, { "settings", sc_settings }, { "play", sc_play }, { "levels", sc_levels }, { "mixui", sc_mixui }, { "fx", sc_fx }, { "editor2", sc_editor2 }, { "serve", sc_serve }, { "vis", sc_vis }, { "banksave", sc_banksave }, { "punch", sc_punch }, { "film", sc_film }, { "inst", sc_inst }, { "lowend", sc_lowend }, { "tour", sc_tour }, { "saveproj", sc_saveproj }, { "selwalk", sc_selwalk }, { "punchsnd", sc_punchsnd }, { "midiimp", sc_midiimp }, { "arpall", sc_arpall }, { "chordrec", sc_chordrec }, { "songeng", sc_songeng }, { "midi2", sc_midi2 }, { "savecrackle", sc_savecrackle }, { "pagecost", sc_pagecost }, { "punchbig", sc_punchbig }, { "film2", sc_film2 }, { "bigproj", sc_bigproj }, { "bigcut", sc_bigcut }, { "punch2", sc_punch2 }, { "crumb", sc_crumb }, { "nan", sc_nan } };
 static void (*tw_sc)(void);
 static void *tw_script(void *arg)
 {

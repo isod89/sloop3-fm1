@@ -27,9 +27,34 @@ static float unbip(uint32_t v) { return v > 200u ? 0.0f : ((float)v - 100.0f) * 
  * time into a cache its sub-readers share) */
 typedef struct { uint8_t *p; uint32_t n, lo, hi; int bad, strict, crc_on; uint32_t crc; } wr;
 typedef struct { const uint8_t *p; uint32_t n, len, base; int bad; project_fetch fetch; uint8_t *cache; uint32_t *cat; } rd;
+void (*project_yield)(void);
+#ifdef HOST
+#define PY() do { tw_since_py = 0; if (project_yield) project_yield(); } while (0)
+#else
+#define PY() do { if (project_yield) project_yield(); } while (0)
+#endif
+static const uint32_t *crc_t;                             /* (3.4.3: the CRC a byte at a time, kept inverted while written) */
+#ifdef HOST                                                /* (3.4.3) the twin: the FM-1's time for these bytes */
+#include <stdlib.h>
+void tw_charge(uint32_t ns);
+static uint32_t tw_bytes; static int tw_bns = -1;
+#include <execinfo.h>
+#include <unistd.h>
+static uint32_t tw_since_py; static int tw_bt;
+static void tw_byte(void)
+{
+    if (tw_bns < 0) { const char *e = getenv("TWIN_BYTE_NS"); tw_bns = e ? atoi(e) : 0; }
+    if (tw_bns && ++tw_bytes >= 64u) { tw_bytes = 0; tw_charge(64u * (uint32_t)tw_bns); }
+    if (++tw_since_py == 3000u && getenv("TWIN_PY_TRACE") && tw_bt++ < 6) { void *f[12]; int n = backtrace(f, 12); write(1, "PY-GAP\n", 7); backtrace_symbols_fd(f, n, 1); }
+}
+#define TWB() tw_byte()
+#else
+#define TWB() ((void)0)
+#endif
 static void w8(wr *w, uint32_t v)
 {
-    if (w->crc_on) { uint8_t b = (uint8_t)v; w->crc = crc32_ieee(w->crc, &b, 1); }
+    TWB();
+    if (w->crc_on) w->crc = crc_t[(w->crc ^ v) & 255u] ^ (w->crc >> 8);
     if (w->n >= w->lo && w->n < w->hi) w->p[w->n - w->lo] = (uint8_t)v;
     else if (w->strict && w->n >= w->hi) w->bad = 1;
     w->n++;
@@ -39,6 +64,7 @@ static void w32(wr *w, uint32_t v) { w16(w, v); w16(w, v >> 16); }
 static void wf(wr *w, float f) { union { float f; uint32_t u; } x; x.f = f; w32(w, x.u); }
 static uint32_t r8(rd *r)
 {
+    TWB();
     if (r->n + 1 > r->len) { r->bad = 1; return 0; }
     if (!r->fetch) return r->p[r->n++];
     uint32_t at = r->base + r->n++;
@@ -97,6 +123,7 @@ static void ev_pack(wr *w, const seq_pat *p)
         if (b & 0x20u) wv(w, gcode(v->len));
         if (b & 0x10u) { w8(w, v->cond); w8(w, v->ratchet); }
         pt = v->tick; pv = v->vel; pl = v->len; pn = v->note;
+        if ((e & 31) == 31) PY();
     }
 }
 static int ev_unpack(rd *r, seq_pat *p, uint32_t n)      /* 0: n notes read, each in range (p 0: only checked) */
@@ -110,6 +137,7 @@ static int ev_unpack(rd *r, seq_pat *p, uint32_t n)      /* 0: n notes read, eac
         if (b & 0x10u) { cond = r8(r); rat = r8(r); }
         if (r->bad || note > 127u || t > 0xFFFFu || len > 0xFFFFu) return -1;
         pt = t; pv = vel; pl = len; pn = note;
+        if ((e & 31) == 31) PY();
         if (!p) continue;                             /* (the dry run: read, checked, not kept) */
         seq_ev *v = &p->ev[e];
         v->tick = (uint16_t)t; v->len = (uint16_t)len; v->note = (uint8_t)note; v->vel = (uint8_t)(vel & 127u); v->cond = (uint8_t)cond;
@@ -137,6 +165,7 @@ static void save_body(wr *wp, const seq_t *q, const gb_sound *s, const project_e
     for (int t = 0; t < SEQ_NTRK; t++) for (int i = 0; i < SEQ_NPAT; i++) {
         const seq_pat *p = &q->t[t].pat[i];
         if (!p->n && !p->nlock && p->steps == 16) continue;
+        PY();
         w8(&w, (uint32_t)t); w8(&w, (uint32_t)i); w16(&w, p->steps); w16(&w, p->n); w8(&w, p->nlock);
         wr cnt = { 0, 0, 0, 0, 0, 0, 0, 0 };               /* 15: packed, counted first; kept as they are when not smaller */
         ev_pack(&cnt, p);
@@ -146,6 +175,7 @@ static void save_body(wr *wp, const seq_t *q, const gb_sound *s, const project_e
             for (int e = 0; e < p->n; e++) {
                 w16(&w, p->ev[e].tick); w16(&w, p->ev[e].len); w8(&w, p->ev[e].note); w8(&w, p->ev[e].vel);
                 w8(&w, p->ev[e].cond); w8(&w, p->ev[e].ratchet);
+                if ((e & 31) == 31) PY();
             }
         }
         for (int l = 0; l < p->nlock; l++) { w8(&w, p->lk[l].step); w8(&w, p->lk[l].param); w8(&w, p->lk[l].value); }
@@ -190,6 +220,7 @@ static void save_body(wr *wp, const seq_t *q, const gb_sound *s, const project_e
         for (int i = 0; i < SEQ_NPAT; i++) if ((mask >> i) & 1u) {
             uint8_t b[PS_BYTES + PS_DRUM_BYTES]; int n = ps_write(ps, t, i, b);
             for (int k = 0; k < n; k++) w8(&w, b[k]);
+            PY();
         }
     }
     /* 13: the device's settings (HOME), kept with the projects (taken at power-on only) */
@@ -209,11 +240,11 @@ static void save_body(wr *wp, const seq_t *q, const gb_sound *s, const project_e
         for (int u = t + 1; u < SEQ_NTRK; u++) rest += 1u + (x && x->ps ? PS_BYTES + (u == PS_DRUM ? PS_DRUM_BYTES : 0u) : 0u);
         if (diff && w.n + need + 5u + 8u * k->n + 3u * k->nlock + rest > STORE_PMAX) fl &= ~2u;   /* (the largest project: it must fit
                                                          its place; the pattern as it is counts as saved then) */
-        w8(&w, fl);
+        w8(&w, fl); PY();
         if (fl & 1u) { uint8_t b[PS_BYTES + PS_DRUM_BYTES]; int n = ps_write(x->ps, t, cur, b); for (int i = 0; i < n; i++) w8(&w, b[i]); }
         if (fl & 2u) {
             w16(&w, k->steps); w16(&w, k->n); w8(&w, k->nlock);
-            for (int e = 0; e < k->n; e++) { w16(&w, k->ev[e].tick); w16(&w, k->ev[e].len); w8(&w, k->ev[e].note); w8(&w, k->ev[e].vel); w8(&w, k->ev[e].cond); w8(&w, k->ev[e].ratchet); }
+            for (int e = 0; e < k->n; e++) { w16(&w, k->ev[e].tick); w16(&w, k->ev[e].len); w8(&w, k->ev[e].note); w8(&w, k->ev[e].vel); w8(&w, k->ev[e].cond); w8(&w, k->ev[e].ratchet); if ((e & 31) == 31) PY(); }
             for (int l = 0; l < k->nlock; l++) { w8(&w, k->lk[l].step); w8(&w, k->lk[l].param); w8(&w, k->lk[l].value); }
         }
     }
@@ -227,9 +258,10 @@ int project_save(const seq_t *q, const gb_sound *s, const project_extra *x, uint
 }
 int project_part(const seq_t *q, const gb_sound *s, const project_extra *x, uint8_t *buf, uint32_t lo, uint32_t n, uint32_t *crc)
 {
-    wr w = { buf, 0, lo, lo + n, 0, 0, crc != 0, 0 };
+    wr w = { buf, 0, lo, lo + n, 0, 0, crc != 0, 0xFFFFFFFFu };
+    crc_t = crc32_table();
     save_body(&w, q, s, x);
-    if (crc) *crc = w.crc;
+    if (crc) *crc = ~w.crc;
     return (int)w.n;
 }
 
@@ -256,7 +288,7 @@ static int load_body(seq_t *q, gb_sound *s, project_extra *x, rd r, int check_on
         if (ver >= 15) {
             uint32_t md = r8(&chk), nb = r16(&chk);
             if (md > 1u || (md == 0u && nb != 8u * n) || chk.bad || chk.n + nb > len) return -1;
-            if (md == 1u) { rd sub = sub_of(&chk, nb); if (ev_unpack(&sub, 0, n) || sub.n != nb) return -1; }
+            if (md == 1u) { PY(); rd sub = sub_of(&chk, nb); if (ev_unpack(&sub, 0, n) || sub.n != nb) return -1; }
             chk.n += nb + nl * 3u;
         }
         else chk.n += n * evb + nl * 3u;
@@ -325,6 +357,7 @@ static int load_body(seq_t *q, gb_sound *s, project_extra *x, rd r, int check_on
             continue;
         }
         seq_pat *p = &q->t[t].pat[i];
+        PY();
         p->steps = (uint16_t)r16(&r); p->n = (uint16_t)r16(&r); p->nlock = (uint8_t)(ver >= 2 ? r8(&r) : 0u);
         uint32_t md = ver >= 15 ? r8(&r) : 0u, nb = ver >= 15 ? r16(&r) : 0u;
         if (md == 1u) {                               /* 15: packed (their bytes: nb, checked above) */
@@ -336,6 +369,7 @@ static int load_body(seq_t *q, gb_sound *s, project_extra *x, rd r, int check_on
             p->ev[e].note = (uint8_t)(r8(&r) & 127u); p->ev[e].vel = (uint8_t)(r8(&r) & 127u);
             p->ev[e].cond = (uint8_t)(ver >= 2 ? r8(&r) : SEQ_ALWAYS);
             uint32_t ra = ver >= 2 ? r8(&r) : 1u, rn = ra & 7u; p->ev[e].ratchet = (uint8_t)((rn < 1 ? 1 : rn > 4 ? 4 : rn) | (ra & 0x70u));   /* (+ ACCENT, SLIDE) */
+            if ((e & 31) == 31) PY();
         }
         for (int l = 0; l < p->nlock; l++) { p->lk[l].step = (uint8_t)r8(&r); p->lk[l].param = (uint8_t)(r8(&r) & 63u); p->lk[l].value = (uint8_t)r8(&r); }
         if (ver < 12) p->nlock = 0;                   /* (locks of another sound model) */
@@ -417,6 +451,7 @@ static int load_body(seq_t *q, gb_sound *s, project_extra *x, rd r, int check_on
         uint32_t m = r16(&r);
         for (int i = 0; i < 16; i++) if ((m >> i) & 1u) {
             uint32_t n = (ver >= 13 ? PS_BYTES : ver >= 12 ? PS_BYTES12 : 31u) + (t == PS_DRUM ? PS_DRUM_BYTES : 0u);
+            PY();
             if (ver >= 12 && x && x->ps && i < SEQ_NPAT && r.n + n <= r.len) {
                 uint8_t b[PS_BYTES + PS_DRUM_BYTES]; rd sb = sub_of(&r, n);
                 for (uint32_t k = 0; k < n && k < sizeof b; k++) b[k] = (uint8_t)r8(&sb);
@@ -433,6 +468,7 @@ static int load_body(seq_t *q, gb_sound *s, project_extra *x, rd r, int check_on
     if (x) { memset(x->keep_got, 0, sizeof x->keep_got); memset(x->pscur_got, 0, sizeof x->pscur_got); }
     if (ver >= 16) for (int t = 0; t < SEQ_NTRK; t++) {   /* 16: the current patterns and their sounds as last saved */
         uint32_t fl = r8(&r), cur = q->t[t].cur;
+        PY();
         if (fl & 1u) {
             uint32_t n = PS_BYTES + (t == PS_DRUM ? PS_DRUM_BYTES : 0u);
             if (x && x->ps && r.n + n <= r.len) {
@@ -449,6 +485,7 @@ static int load_body(seq_t *q, gb_sound *s, project_extra *x, rd r, int check_on
                 k->ev[e].tick = (uint16_t)r16(&r); k->ev[e].len = (uint16_t)r16(&r);
                 k->ev[e].note = (uint8_t)(r8(&r) & 127u); k->ev[e].vel = (uint8_t)(r8(&r) & 127u); k->ev[e].cond = (uint8_t)r8(&r);
                 uint32_t ra = r8(&r), rn = ra & 7u; k->ev[e].ratchet = (uint8_t)((rn < 1 ? 1 : rn > 4 ? 4 : rn) | (ra & 0x70u));
+                if ((e & 31) == 31) PY();
             }
             for (int l = 0; l < k->nlock; l++) { k->lk[l].step = (uint8_t)r8(&r); k->lk[l].param = (uint8_t)(r8(&r) & 63u); k->lk[l].value = (uint8_t)r8(&r); }
             for (int a = 1; a < k->n; a++) { seq_ev ea = k->ev[a]; int b = a; while (b > 0 && k->ev[b - 1].tick > ea.tick) { k->ev[b] = k->ev[b - 1]; b--; } k->ev[b] = ea; }

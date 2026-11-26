@@ -37,7 +37,7 @@ SECTIONS {
   /* (in the low RAM since 3.0B9: the slot's room goes to the code) */
   /* (3.4.1) its first 512 bytes the interrupts' stack (ssp: hal/fm1/ramapp_start.S; the tick's deepest is ~140 bytes,
    * tools/stackcheck.py), the rest the main stack (its deepest ~4.7 KB) */
-  .stack (NOLOAD) : { . = ALIGN(8); __sstack_low = .; . += 0x200; __sstack_top = .; __stack_low = .; . += 0x1A00; __stack_top = .; } > low
+  .stack (NOLOAD) : { . = ALIGN(8); __sstack_low = .; . += 0x200; __sstack_top = .; __stack_low = .; . += 0x1C00; __stack_top = .; } > low
   .bootbss (NOLOAD) : { . = ALIGN(8); *(.bootbss*) } > boot
   ASSERT(ADDR(.noinit) + SIZEOF(.noinit) <= 0x01C7FD80, "the firmware does not fit its slot")
 }

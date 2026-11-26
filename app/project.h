@@ -33,6 +33,9 @@ int project_save(const seq_t *q, const gb_sound *s, const project_extra *x, uint
 /* 3.3.5: the file's bytes [lo, lo + n) into buf (a part: a page, a chunk), its whole length returned, its CRC (32,
  * IEEE) in *crc when asked */
 int project_part(const seq_t *q, const gb_sound *s, const project_extra *x, uint8_t *buf, uint32_t lo, uint32_t n, uint32_t *crc);
+/* (3.4.3) called often while a project is written or read (between its patterns, every 32 notes): the FM-1's sound
+ * served meanwhile (fw/main.c audio_yield). 0: nothing */
+extern void (*project_yield)(void);
 /* a project read through fetch (the flash: n bytes at the file's offset off into dst, 0 = read), len bytes long;
  * check_only: only checked, nothing loaded */
 typedef int (*project_fetch)(uint32_t off, void *dst, uint32_t n);

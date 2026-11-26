@@ -16,7 +16,7 @@ typedef struct { uint32_t magic, seq, len, dcrc; uint8_t slot, pad[3]; uint32_t 
 static const store_flash *F;
 static struct { int state; int slot, copy; const uint8_t *data; uint32_t len, seq, at, pages, done_ops, all_ops, vat, vcrc; hdr h; } W;
 static uint8_t page[256] __attribute__((aligned(4))) GB_BOOTRAM;   /* (3.4.1: in m-bootloader's RAM, written before read: the slot's room) */
-static uint8_t chk[1024] __attribute__((aligned(4))) GB_LOWRAM;   /* (a save's reading back: read into before checked) */
+static uint8_t chk[512] __attribute__((aligned(4))) GB_LOWRAM;    /* (a save's reading back: read into before checked; 3.4.3: 512, the main stack 512 more) */
 /* (3.3.5) the one project's save: see the banks below */
 static struct { int state, known; uint32_t bank, off, len, given, prog, vat, vcrc, need_n; const uint8_t *d; uint32_t d_off, d_n; hdr h; } P;
 
@@ -24,6 +24,7 @@ static struct { int state, known; uint32_t bank, off, len, given, prog, vat, vcr
 /* a byte at a time through a table (1 KB, made at the first call): a 20 KB project in ~0.3 ms, between two audio
  * blocks */
 static uint32_t CRC_T[256];
+const uint32_t *crc32_table(void) { if (!CRC_T[1]) crc32_ieee(0, "", 0); return CRC_T; }
 uint32_t crc32_ieee(uint32_t crc, const void *d, uint32_t n)
 {
     if (!CRC_T[1]) for (uint32_t i = 0; i < 256; i++) { uint32_t c = i; for (int k = 0; k < 8; k++) c = c & 1u ? (c >> 1) ^ 0xEDB88320u : c >> 1; CRC_T[i] = c; }
@@ -123,6 +124,8 @@ XT static int phdr(uint32_t b, uint32_t s, hdr *h)
     if (F->read(pbank(b) + s * 4096u, h, sizeof *h)) return 0;
     return h->magic == MAGIC3 && h->hcrc == crc32_ieee(0, h, 20) && h->pad[0] == s && h->len >= 16u && s * 4096u + 256u + h->len <= STORE_PBANK;
 }
+void (*store_yield)(void);
+int store_no_erase;
 XT static int pwhole(uint32_t b, uint32_t s, hdr *h)     /* its header, and its data with the CRC the header says */
 {
     if (!phdr(b, s, h)) return 0;
@@ -131,6 +134,7 @@ XT static int pwhole(uint32_t b, uint32_t s, hdr *h)     /* its header, and its 
         uint32_t n = h->len - a > 256u ? 256u : h->len - a;
         if (F->read(at + a, page, (n + 3u) & ~3u)) return 0;
         c = crc32_ieee(c, page, n);
+        if (store_yield && (a & 1023u) == 768u) store_yield();   /* (3.4.3: a large project, 52 KB: the sound served) */
     }
     return c == h->dcrc;
 }
@@ -152,7 +156,7 @@ XT static int pscan(hdr *best, uint32_t *ps, uint32_t *top, uint32_t *end)
     }
 }
 XT static int pnewest(hdr *h) { uint32_t s, t, e[2]; return pscan(h, &s, &t, e); }
-static int blank4k(uint32_t a)                           /* a sector all erased (read, 1 KB at a time) */
+static int blank4k(uint32_t a)                           /* a sector all erased (read, 512 bytes at a time) */
 {
     for (uint32_t o = 0; o < 4096u; o += sizeof chk) {
         if (F->read(a + o, chk, sizeof chk)) return 0;
@@ -198,11 +202,14 @@ XT int store_proj_begin(uint32_t len, uint32_t crc, int known)
      * (prepared while stopped: erased already). The newest whole copy is never touched */
     if (end[kb] + P.need_n <= PSECT) { P.bank = kb; P.off = end[kb]; }
     else { P.bank = ob; P.off = end[ob] + P.need_n <= PSECT ? end[ob] : 0u; }
+    /* (3.4.3) asked not to erase (it plays: an erase keeps the flash window off for tens of ms, and the samples and
+     * kits read from it go silent): -3 if a sector it would take is not erased already, nothing begun */
+    if (store_no_erase) for (uint32_t i = 0; i < P.need_n; i++) { if (store_yield) store_yield(); if (!blank4k(pbank(P.bank) + (P.off + i) * 4096u)) return -3; }
     P.len = len; P.known = known; P.given = 0; P.prog = 0; P.vat = 0; P.vcrc = 0; P.d = 0; P.d_n = 0; P.d_off = 0;
     P.h.magic = MAGIC3; P.h.seq = seq + 1u; P.h.len = len; P.h.dcrc = crc; P.h.slot = 0; P.h.pad[0] = (uint8_t)P.off; P.h.pad[1] = P.h.pad[2] = 0;
     P.h.hcrc = crc32_ieee(0, &P.h, 20);
     pre_known = 0;                                       /* (written now: prepared again after it) */
-    W.done_ops = 0; W.all_ops = P.need_n + (len + 255u) / 256u + (len + 1023u) / 1024u + 1u;
+    W.done_ops = 0; W.all_ops = P.need_n + (len + 255u) / 256u + (len + 511u) / 512u + 1u;
     P.state = 1;                                         /* the sectors */
     return 0;
 }
@@ -244,7 +251,7 @@ static int proj_step(void)
             P.prog = end; if ((end & 255u) == 0u || end == P.len) W.done_ops++;
             return 1;
         }
-    case 3:                                              /* every byte written: read back, 1 KB a step */
+    case 3:                                              /* every byte written: read back, 512 bytes a step */
         if (!P.known) return 1;                          /* (an upload: its CRC still to come) */
         {
             uint32_t n = P.len - P.vat > sizeof chk ? sizeof chk : P.len - P.vat;
@@ -284,7 +291,7 @@ int store_step(void)
         if (F->program_start(base + 256u + off, page, n)) { W.state = -1; return -1; }
     } else if (W.at == sectors + W.pages) {                     /* the header: from now on this copy counts */
         if (F->program_start(base, &W.h, sizeof W.h)) { W.state = -1; return -1; }
-    } else {                                                     /* checked as a load would, 1 KB a step */
+    } else {                                                     /* checked as a load would, 512 bytes a step */
         if (W.vat == 0) {
             hdr h;
             if (!hdr_read(W.copy, &h) || h.slot != W.slot || h.seq != W.seq || h.len != W.len || h.dcrc != W.h.dcrc) { W.state = -1; return -1; }

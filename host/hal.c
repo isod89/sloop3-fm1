@@ -36,7 +36,13 @@ static uint32_t lsb_mhz = 60;
 static int wdt_on; static uint64_t wdt_ns;
 uint32_t tw_wdt_feeds;
 static void wdt_check(void) { if (wdt_on && tw_ns - wdt_ns > 4000000000ull) { wdt_on = 0; fprintf(stderr, "!! TWIN: the watchdog: no feed for 4 s (the FM-1 would restart)\n"); twin_end(6); } }
-static void adv(uint32_t ns) { tw_ns += ns; wdt_check(); twin_tick(); }
+#include <execinfo.h>
+static uint64_t next_half_v(void);
+static void adv(uint32_t ns)
+{
+    tw_ns += ns; wdt_check(); twin_tick();
+    if (getenv("TWIN_ADV_TRACE")) { static uint64_t told; uint64_t due = next_half_v(); if (due && tw_ns > due && told != due) { told = due; void *f[14]; int n = backtrace(f, 14); printf("ADV-LATE %u ns\n", ns); fflush(stdout); backtrace_symbols_fd(f, n, 1); } }
+}
 void tw_draw_cost(void) { static int us = -1; if (us < 0) { const char *e = getenv("TWIN_DRAW_US"); us = e ? atoi(e) : 0; } if (us) adv((uint32_t)us * 1000u); }
 /* 3.3.4: the timer read before time_init started it: on the FM-1 a wait that never ends (3.3.3's black screen) */
 static int time_on;
@@ -302,22 +308,33 @@ static int32_t *abuf; static uint32_t ahalf; static int afill; static uint64_t n
 #define HALF_NS(n) ((uint64_t)(n) / 2u * 544u * 1000u / 24u)  /* (n words: n / 2 frames at 24 MHz / 544) */
 int audio_start(int32_t *buf, uint32_t half_words) { abuf = buf; ahalf = half_words; afill = 0; next_half = tw_ns; return AUDIO_OK; }
 int audio_half_free(void) { return abuf && tw_ns >= next_half; }
+static uint64_t next_half_v(void) { return abuf ? next_half + HALF_NS(ahalf) : 0; }
 uint64_t tw_half_cpu_ns;                       /* the host's time to render the last half (the cost's proxy) */
 static uint64_t half_t0;
 static uint64_t cpu_ns(void) { struct timespec t; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
 /* (3.4.1) TWIN_HALF_US, or tw_half_us (a scenario's): each half's sound costs that much CPU time (a heavy project:
  * the load guard, CPU OVERLOAD) */
-uint32_t tw_half_us;
+uint32_t tw_half_us; int tw_quiet_half;
 int32_t *audio_free_half(void)
 {
     static int us = -1; if (us < 0) { const char *e = getenv("TWIN_HALF_US"); us = e ? atoi(e) : 0; }
-    half_t0 = cpu_ns(); if (tw_half_us) adv((uint32_t)tw_half_us * 1000u); else if (us) adv((uint32_t)us * 1000u);
+    half_t0 = cpu_ns();
+    if (tw_quiet_half) tw_quiet_half = 0;
+    else if (tw_half_us) adv((uint32_t)tw_half_us * 1000u); else if (us) adv((uint32_t)us * 1000u);
     return abuf + (uint32_t)afill * ahalf;
 }
 int audio_playing_half(void) { return afill ^ 1; }
+uint32_t tw_underruns; uint64_t tw_underrun_at;
+void tw_charge(uint32_t ns) { if (ns) adv(ns); }
+/* (3.4.3) a scenario's erase (oversave) started by the firmware's thread at its main loop's top, where the firmware
+ * starts its own (store_step): the scenario's thread gets turns inside the interface's round too (audio_yield), where
+ * the firmware never leaves the window off */
+volatile uint32_t tw_erase_at; volatile int tw_erase_r;
+void tw_loop_top(void) { uint32_t a = tw_erase_at; if (a) { tw_erase_r = flash_erase_start(a); tw_erase_at = 0; } }
 void audio_half_done(void)
 {
     tw_half_cpu_ns = cpu_ns() - half_t0;
+    if (tw_ns > 3000000000ull && tw_ns > next_half + HALF_NS(ahalf)) { tw_underruns++; tw_underrun_at = tw_ns; if (tw_underruns <= 12) printf("[%8.3f] !! TWIN: a half %.2f ms late, in %s\n", (double)tw_ns * 1e-9, (double)(tw_ns - next_half - HALF_NS(ahalf)) * 1e-6, tw_job_name()); }   /* (3.4.3: due before the other half ended) */
     twin_audio(abuf + (uint32_t)afill * ahalf, ahalf / 2u);
     afill ^= 1;
     next_half += HALF_NS(ahalf);

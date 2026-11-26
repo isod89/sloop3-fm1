@@ -23,8 +23,18 @@ void seq_set_bpm(seq_t *s, float bpm) { s->bpm = bpm < 30.0f ? 30.0f : bpm > 300
 static seq_pat *cur(seq_t *s, int t) { return &s->t[t].pat[s->t[t].cur]; }
 /* the step an event belongs to: the nearest (a note played a little early is its step's, as heard; a nudged one
  * keeps its step); the last half step before the end belongs to step 1. -1: past the pattern's end */
+#ifdef HOST                              /* (3.4.4) the twin: the FM-1's time for each event looked at (TWIN_EV_NS) */
+#include <stdlib.h>
+void tw_charge(uint32_t ns);
+static uint32_t tw_evs; static int tw_evns = -1;
+#define TWEV() do { if (tw_evns < 0) { const char *e_ = getenv("TWIN_EV_NS"); tw_evns = e_ ? atoi(e_) : 0; } \
+                    if (tw_evns && ++tw_evs >= 64u) { tw_evs = 0; tw_charge(64u * (uint32_t)tw_evns); } } while (0)
+#else
+#define TWEV() ((void)0)
+#endif
 static int step_of(const seq_pat *p, uint32_t tick)
 {
+    TWEV();
     uint32_t st = (tick + SEQ_TPS / 2) / SEQ_TPS;
     if (st < p->steps) return (int)st;
     if (st == p->steps && tick < (uint32_t)p->steps * SEQ_TPS) return 0;
@@ -369,6 +379,23 @@ void seq_step_reset(seq_t *s, int trk, int step)
     seq_pat *p = cur(s, trk);
     locks_drop(p, step);
 }
+SEQ_COLD void seq_cells_get(const seq_t *s, int trk, int first, int note, seq_cells *c)
+{
+    const seq_pat *p = &s->t[trk].pat[s->t[trk].cur];
+    memset(c, 0, sizeof *c);
+    uint32_t seen = 0;                                   /* (the step's first event tells its condition, its ratchet) */
+    for (int i = 0; i < p->n; i++) {
+        const seq_ev *e = &p->ev[i];
+        int st = step_of(p, e->tick) - first;
+        if (st < 0 || st >= 16) continue;
+        uint32_t b = 1u << st;
+        c->any |= (uint16_t)b;
+        if (!(seen & b)) { seen |= b; if (e->cond != SEQ_ALWAYS) c->cond |= (uint16_t)b; if (SEQ_RAT(e->ratchet) > 1) c->rat |= (uint16_t)b; }
+        if (e->note < 16) c->row[e->note] |= (uint16_t)b;
+        if ((note < 0 || e->note == note) && !(c->hit & b)) { c->hit |= (uint16_t)b; c->vel[st] = e->vel; c->ratn[st] = (uint8_t)SEQ_RAT(e->ratchet); }
+    }
+    for (int i = 0; i < p->nlock; i++) { int st = (int)p->lk[i].step - first; if (st >= 0 && st < 16) c->lock |= (uint16_t)(1u << st); }
+}
 SEQ_COLD int seq_step_info(const seq_t *s, int trk, int step, int *cond, int *ratchet)
 {
     const seq_pat *p = &s->t[trk].pat[s->t[trk].cur];
@@ -540,7 +567,7 @@ uint32_t seq_step_of(const seq_t *s, int trk)
     const seq_track *k = &s->t[trk];
     return (local_of(k, s->tick) - k->origin) % plen(k) / SEQ_TPS;
 }
-SEQ_COLD void seq_queue(seq_t *s, int trk, int pat)
+void seq_queue(seq_t *s, int trk, int pat)   /* (in RAM: the main loop's quick chain calls it while a save has the window off) */
 {
     if (pat < 0 || pat >= SEQ_NPAT) return;
     if (trk < 0 && s->playing) {                     /* (3.3.7) every track: if one changes, all start together at the

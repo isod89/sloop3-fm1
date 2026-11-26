@@ -24,6 +24,22 @@ m-bootloader)
 
 ## What's new
 
+**3.4.4: no more crackle on the drums' grid with a full pattern.** Each screen read every step of the playing
+pattern once per step and per sound (256 times for the drums' grid), a few milliseconds with a full pattern on top of
+a heavy sound: the half came late, a crackle a quarter of a second apart. The screen's steps are now read in one pass
+(`seq_cells_get`), 10 to 20 times less work on every page. Checked in the twin, every page of a full project with a
+heavy sound: 37 late halves before (10 on the drums' grid), none after.
+
+If SLOOP 3 ever restarts by itself, **GLO > SYSTEM** (3/9) now shows the whole report until you power off, e.g.
+"RESTART IN MIX/FX · ECHO · 3 MIN · CPU 97% · 24 V · R04": please paste it in an issue.
+
+**3.4.3: no more crackle when you save.** Saving made the whole project's bytes in one go, more than the sound's
+5.8 ms between two halves (tens of ms for a large project): the output played the last half again, a crackle. The
+sound is now served from inside every long job (writing or reading the project, checking a saved copy, between the
+screen's parts), a project opened or a new one fades out and stays silent while it loads, and a save that would have
+to erase the flash while it plays (rare) waits for the stop ("SAVED WHEN YOU STOP"). Checked in the twin with the
+FM-1's slow work priced in: 19 late halves before, none after.
+
 **3.4.2: the issues.** A song changing a track's engine between patterns plays step 1 again (#24); ratchets follow
 the swing (#17); a track keeps to the beat when its DIV changes while playing (#18, #26); the arpeggiator's and the
 rolls' notes are recorded where they sound, 1/32 too (#28); each drum sound has its own LEVEL (#25); STRUM goes below

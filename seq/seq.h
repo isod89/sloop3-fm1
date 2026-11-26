@@ -153,6 +153,12 @@ int seq_step_write(seq_t *s, int trk, int step, const uint8_t *notes, int n, int
                                                                                           its index of notes[0], -1 */
 void seq_step_reset(seq_t *s, int trk, int step);        /* its locks, condition and ratchet cleared */
 int seq_step_info(const seq_t *s, int trk, int step, int *cond, int *ratchet);   /* the number of locks */
+/* (3.4.4) 16 steps from `first` for the screen and the keys' lights, in one pass over the events (a bit a step):
+ * any note, the first event's condition not ALWAYS and its ratchet over 1, a lock, each drum sound's row (notes
+ * 0-15), `note`'s hits (note < 0: any) and their velocity and ratchet. (Was a pass a step and a sound: 256 passes
+ * of a full pattern for the drums' grid, some milliseconds on the FM-1: the sound's crackle) */
+typedef struct { uint16_t any, cond, rat, lock, hit, row[16]; uint8_t vel[16], ratn[16]; } seq_cells;
+void seq_cells_get(const seq_t *s, int trk, int first, int note, seq_cells *c);
 int seq_step_get(const seq_t *s, int trk, int step, int *note, int *vel, int *nudge);   /* 0: an empty step */
 void seq_step_note(seq_t *s, int trk, int step, int delta);   /* every note of the step, semitones */
 void seq_step_vel(seq_t *s, int trk, int step, int vel);

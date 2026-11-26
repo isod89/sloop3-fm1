@@ -95,6 +95,8 @@ step early or leaves a hole at the end; a "1" played again just before REC is ke
   CPU OVERLOAD: VOICES CUT, CORE 2: FAILED…).
 
 The autosave opens no window: PROJECT SAVED (AUTO) is written in the title line.
+While it plays, a save never stops the sound. In the rare case where the flash would first have to be erased (a dozen
+saves in a row without stopping), it says **SAVED WHEN YOU STOP** and is written as soon as you press STOP.
 
 ### SOUNDS: choosing a sound
 

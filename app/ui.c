@@ -367,6 +367,28 @@ static void draw_foot(const ui_view *v)
     ts(x + 10, Y_FOOT + 20, cut(b, v->sound[v->trk], 12, room), C_AMB);
     tsr(236, Y_FOOT + 20, ti, C_GRAY);
 }
+static void fit3(const gfx_font *big, int x, int y, int w, int h, const char *s, uint16_t c, int align);
+/* (3.4.4) a line too long for the title (HOME > SYSTEM: the last stop, "RESTART IN MIX/FX · ECHO · 3 MIN · CPU 97% ·
+ * 24 V · R04"): on two lines over the title, cut at the " · " nearest its middle */
+static void long_info(const char *s)
+{
+    if (!gfx_visible(0, 0, GFX_W, 44)) return;
+    int n = 0; while (s[n]) n++;
+    int at = -1;
+    for (int i = 0; i + 3 < n; i++)
+        if (s[i] == ' ' && (unsigned char)s[i + 1] == 0xC2 && (unsigned char)s[i + 2] == 0xB7 && s[i + 3] == ' ' &&
+            (at < 0 || (i > n / 2 ? i - n / 2 : n / 2 - i) < (at > n / 2 ? at - n / 2 : n / 2 - at))) at = i;
+    char a[48], b[48];
+    int la = at < 0 ? n : at; if (la > 47) la = 47;
+    for (int i = 0; i < la; i++) a[i] = s[i];
+    a[la] = 0;
+    int lb = 0; if (at >= 0) for (const char *q = s + at + 4; *q && lb < 47; q++) b[lb++] = *q;
+    b[lb] = 0;
+    rect(0, 0, 240, 44, BG);
+    fit3(&font_s, 4, 3, 232, font_s.cap, a, WHITE, 0);
+    if (lb) fit3(&font_s, 4, 22, 232, font_s.cap, b, WHITE, 0);
+    rect(4, 41, 232, 2, RGB(255, 210, 60));
+}
 static void page_frame(const ui_view *v)
 {
     const char *msg = v->toast ? v->toast : v->info;
@@ -399,6 +421,7 @@ static void page_frame(const ui_view *v)
         break;
     default: graph_big(v); break;
     }
+    if (!v->toast && !v->saving && v->info && v->page == UI_GENERIC && ws(v->info) > 232) long_info(v->info);
     draw_foot(v);
 }
 

@@ -552,9 +552,47 @@ static void loop_stack_test(void)
     CHECK(pos_of(0) == 2 && pos_of(1) == 2, "steps %d and %d (2 and 2)", pos_of(0), pos_of(1));
     seq_play(&S, 0);
 }
+/* (3.4.4) the screen's cells in one pass: as the per-step functions said, on random full patterns (wrap-around,
+ * several notes a step, locks, a page past the end) */
+static void cells_test(void)
+{
+    reset(120.0f);
+    uint32_t r = 12345u;
+    #define RN() (r = r * 1103515245u + 12345u, (r >> 16) & 0x7FFFu)
+    int bad = 0;
+    for (int k = 0; k < 40; k++) {
+        seq_pat *p = &S.t[0].pat[S.t[0].cur];
+        p->steps = (uint16_t)(k % 3 == 0 ? 16 : k % 3 == 1 ? 64 : SEQ_MAXSTEPS);
+        uint32_t tick = 0; p->n = 0;
+        for (int e = 0; e < SEQ_PATEV; e++) {
+            tick += RN() % 60u; if (tick >= (uint32_t)p->steps * SEQ_TPS) break;
+            seq_ev *v = &p->ev[p->n++]; memset(v, 0, sizeof *v);
+            v->tick = (uint16_t)tick; v->len = 40; v->note = (uint8_t)(k & 1 ? RN() % 20u : RN() % 128u); v->vel = (uint8_t)(1u + RN() % 127u);
+            v->cond = (uint8_t)(RN() % 3u ? SEQ_ALWAYS : SEQ_CHANCE + 1u); v->ratchet = (uint8_t)(1u + RN() % 4u);
+        }
+        p->nlock = (uint8_t)(RN() % (SEQ_LOCKS + 1u));
+        for (int l = 0; l < p->nlock; l++) { p->lk[l].step = (uint8_t)(RN() % p->steps); p->lk[l].param = 0; p->lk[l].value = 0; }
+        for (int first = 0; first < SEQ_MAXSTEPS; first += 16) for (int note = -1; note < 16; note += 5) {
+            seq_cells c; seq_cells_get(&S, 0, first, note, &c);
+            for (int i = 0; i < 16; i++) {
+                int st = first + i, b = (1 << i), cd, rt, nl = seq_step_info(&S, 0, st, &cd, &rt), vv = 0, rr = 1;
+                int has = seq_step_has(&S, 0, st, -1);
+                if (!!(c.any & b) != has) bad++;
+                if (has && (!!(c.cond & b) != (cd != SEQ_ALWAYS) || !!(c.rat & b) != (rt > 1))) bad++;
+                if (!!(c.lock & b) != (nl > 0)) bad++;
+                for (int d = 0; d < 16; d++) if (!!(c.row[d] & b) != seq_step_has(&S, 0, st, d)) bad++;
+                int h = note < 0 ? has : seq_hit_get(&S, 0, st, note, &vv, &rr);
+                if (!!(c.hit & b) != h) bad++;
+                if (h && note >= 0 && (c.vel[i] != vv || c.ratn[i] != rr)) bad++;
+            }
+        }
+    }
+    CHECK(bad == 0, "the one-pass cells differ from the per-step functions %d times", bad);
+    #undef RN
+}
 int main(void)
 {
-    add_test(); div_test(); swing_switch_test();
+    cells_test(); add_test(); div_test(); swing_switch_test();
     timing_test(); polymeter_test(); switch_test(); record_test(); edit_test(); step_test(); song_test(); song_hand_test(); move_test(); lenmax_test(); put_test(); sloop_test(); accent_slide_test(); loop_stack_test();
     printf("%d checks, %d failed\n", checks, fails);
     return fails != 0;

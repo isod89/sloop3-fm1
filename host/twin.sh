@@ -32,6 +32,9 @@ run arpall arpall -                      # 3.4.2, issue #22: ARP on every synth 
 run chordrec chordrec -                  # 3.4.2, issues #28, #30: a SEL chord recorded whole, STRUM both ways
 run songeng songeng -                    # 3.4.2, issue #24: a song changing a track's engine: step 1 heard each bar
 run midi2 midi2 -                        # 3.4.2, Sam: every track's channel (CCs, bend, pedal, programs), MIDI LEARN of CC 1 / 11, the pressure, notes out, REMOTE, FX channel
+TWIN_BYTE_NS=500 TWIN_HALF_US=3000 TWIN_DRAW_US=1500 run savecrackle savecrackle -   # 3.4.3, Sam: no half late (a crackle) saving, opening, NEW, the pages, playing; a save that must erase waits for the stop
+TWIN_EV_NS=80 TWIN_BYTE_NS=500 TWIN_HALF_US=4300 TWIN_DRAW_US=1000 run pagecost pagecost -   # 3.4.4, Sam: each page of a full project, playing a heavy sound: no half late (3.4.3: 37, the drums' GRID 10)
+TWIN_SECS=30 TWIN_HALF_US=4300 run punchbig punchbig -   # 3.4.4, Sam: "a restart with PUNCH on a big track": the punch-ins as fast as hands go on the fullest project, a heavy sound
 run savepat savepat -                    # 3.4.0, Sam: patterns saved while it plays, the autosave with PLAY: no erase, no cut
 TWIN_ERASE_MS=300 run oversave oversave -   # 3.4.1: CPU OVERLOAD during a slow erase: said once the window is back (3.4.0 froze)
 run recsave recsave -                    # 3.4.1 (the monkey, seed 6): REC armed, SAVE > PROJECT still saves

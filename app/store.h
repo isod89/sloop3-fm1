@@ -55,6 +55,9 @@ int store_step(void);                            /* 1 working, 2 done, 3 data ne
 int store_raw_begin(uint32_t sector, uint32_t off, const void *data, uint32_t n, int erase);                            /* 0 idle, 1 working, 2 just done, -1 failed */
 uint32_t store_progress(void);                   /* 0..100 */
 uint32_t crc32_ieee(uint32_t crc, const void *d, uint32_t n);
+const uint32_t *crc32_table(void);
+extern void (*store_yield)(void);
+extern int store_no_erase;                         /* (3.4.3) set: store_proj_begin gives -3 rather than erase */                  /* (3.4.3) called every KB while a copy is checked whole (the sound served) */                 /* (3.4.3) the table, made if not yet: a byte at a time without a call */
 /* the user sounds (usersnd.c): two copies of a sector at 0x95000 and 0x96000, saved as a project is (store_step) */
 #define STORE_SOUNDS_AT 0x95000u
 #define STORE_SOUNDS_SLOT 0x53u

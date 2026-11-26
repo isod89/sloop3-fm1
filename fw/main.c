@@ -74,7 +74,7 @@
 #include "../hal/fm1/uart.h"
 #include "../hal/fm1/irq.h"
 
-#define VERSION "3.4.2"
+#define VERSION "3.4.4"
 /* COLD: a function of the interface, run from the flash window (fw/ram.ld .xtext); never called while the window is
  * off (a save's flash work: fw/main.c's loop runs only the sound, the panel and the flash then) */
 #ifdef HOST
@@ -109,11 +109,43 @@ static uint8_t sbuf[STORE_MAX] __attribute__((aligned(4), section(".bootbss")));
 COLD static int sbuf_held(void);     /* (3.1.1) the editor's transfer is in sbuf: nothing else may write it */
 COLD static void sbuf_used(void);    /* (3.1.1) sbuf rewritten: the editor's read of a file starts again */
 COLD static uint32_t proj_measure(uint32_t *crc);   /* (3.3.5) the project's length and CRC */
+COLD static void quiet_begin(void); COLD static void quiet_end(void);   /* (3.4.3) a load: the sound silent meanwhile */
+static void audio_yield(void);                     /* (3.4.3) the sound's half made now if it is due (below) */
 #ifdef HOST
 static uint32_t dark_halves;                    /* (3.3.8) halves rendered with the flash window off (the samples silent) */
+/* (3.4.3) the twin's profile of the main loop's jobs (TWIN_PROF): each one's CPU time on the PC, its worst and its
+ * mean, and when the worst came; the jobs that would hold the sound's next half back on the FM-1 */
+#include <time.h>
+#include <stdlib.h>
+void tw_loop_top(void);                         /* (host/hal.c: a scenario's erase, started here as the firmware's) */
+static uint64_t twp_ns(void) { struct timespec t; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t); return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec; }
+#define TWP_N 40
+static struct { const char *l; uint64_t max, sum; uint32_t n, over; uint64_t at; } twp[TWP_N]; static int twp_k;
+static uint64_t tw_ns_now(void);
+static void twp_add(const char *l, uint64_t d)
+{
+    int i = 0; while (i < twp_k && twp[i].l != l) i++;
+    if (i == twp_k) { if (twp_k == TWP_N) return; twp[twp_k++].l = l; }
+    twp[i].n++; twp[i].sum += d; if (d > 40000u) twp[i].over++;
+    if (d > twp[i].max) { twp[i].max = d; twp[i].at = tw_ns_now(); }
+}
+static const char *twp_cur = "loop";
+#define TWP(l, x) do { const char *_twc = twp_cur; twp_cur = l; uint64_t _twa = twp_ns(); x; twp_add(l, twp_ns() - _twa); twp_cur = _twc; } while (0)
+/* (3.4.3) the longest stretch of the main loop's CPU time with no look at the sound's next half (its making not
+ * counted), and the job it was in: what holds a half back on the FM-1 */
+static uint64_t ay_last, ay_gap_max, ay_gap_at; static const char *ay_gap_job, *ay_last_job; static uint32_t ay_halves;
+static void ay_mark(void)
+{
+    uint64_t now = twp_ns();
+    if (ay_last && now > ay_last && now - ay_last > ay_gap_max && tw_ns_now() > 3000000000ull) { ay_gap_max = now - ay_last; ay_gap_at = tw_ns_now(); ay_gap_job = ay_last_job; }   /* (after the start's 3 s; the job it began in) */
+    ay_last = now; ay_last_job = twp_cur;
+}
+#else
+#define TWP(l, x) x
 #endif
 static int proj, flash_ok, saving, saving_shown, save_said, saving_snd, save_soon;   /* save_soon: SAVE + a key asked for one */
 static int save_nocommit;                       /* (4.0) the next save writes the patterns as they are (SAVE + another key) */
+static uint8_t save_at_stop;                    /* (3.4.3) a save waiting for the stop (1 the autosave's, 2 asked for) */
 static int pat_arm = -1; static uint32_t t_pat_arm;      /* (4.0) a save over another saved pattern asked: the key again */
 static int sp_sel;                                       /* (4.0) SAVE > PATTERNS: the pattern KNOB 1 picked */
 static int pat_used(int t, int w);
@@ -128,9 +160,11 @@ static const char *boot_msg;                 /* (what the first message says, if
  * in the loop, the punch-in running, how long it had played. A few stores a pass: nothing to hear */
 enum { W_NONE, W_MIDI, W_SEQ, W_VOICES, W_MIX, W_USB, W_SAVE, W_FLASH, W_SCREEN, W_N };
 #define CRUMB_MAGIC 0x43524D42u                                  /* "CRMB" */
-static volatile struct { uint32_t magic, where, fx, blocks; } crumb __attribute__((section(".noinit")));
+/* (3.4.4) and the sound's load and voices at the last half, to tell a heavy moment's stop (load near 100 %) from
+ * another (Sam: "a restart with PUNCH on a big track") */
+static volatile struct { uint32_t magic, where, fx, blocks, load, voices; } crumb __attribute__((section(".noinit")));
 #define crumb_at(w) (crumb.where = (w))
-static char crash_msg[64] __attribute__((section(".lowbss")));   /* (.lowbss: not cleared; crumb_report sets it) */
+static char crash_msg[96] __attribute__((section(".lowbss")));   /* (.lowbss: not cleared; crumb_report sets it) */
 static uint32_t proj_used, saved_crc, saved_len;   /* proj_used: 1 when a saved copy of the project is in the flash (3.3.5: one project) */
 enum { HK_OPEN = 0, HK_NEW = 2, HK_SAVE = 4 };      /* (3.3.6) HOME held: the white keys of OPEN, NEW, SAVE (were 1, 8, 16): 1, 3, 5, a key between */
 static uint32_t proj_at, saving_len, save_retry, home_arm_t; static int home_arm;          /* (3.3.5) the saved copy's data in the flash; the length being saved; saves begun again */
@@ -627,6 +661,7 @@ COLD static void preset_extras(int t, int np);
 static uint8_t dm_mode;                                    /* (3.3.8) EDIT's white keys mute the drum sounds (EDIT + a black key) */
 COLD static void new_project(int with_loop)
 {
+    quiet_begin();
     dm_live = 0;                                           /* (the live mutes: a performance's, not the project's) */
     seq_init(&Q, rate_hz, 92.0f, &HIST);
     Q.note_on = sq_on; Q.note_off = sq_off; Q.locks = sq_locks; Q.switched = sq_switched;
@@ -653,6 +688,7 @@ COLD static void new_project(int with_loop)
     for (int t = 0; t < NTRK; t++) { harm[t].root = 0; harm[t].scale = 0; harm[t].keys = KEYS_OFF; harm[t].chord = CH_OFF; harm[t].transpose = 0; }
     base_from_sound(); ps_all(); keep_all();
     if (with_loop) preload();
+    quiet_end();
 }
 COLD static void preload(void)
 {
@@ -1243,20 +1279,21 @@ COLD static void fill_view(ui_view *v)
         v->kind[s] = gb_edesc[S.trk[t].patch.engine < ENG_N ? S.trk[t].patch.engine : 0].name;
         v->mute[s] = q->mute; v->solo[s] = solo[t]; v->rec[s] = (uint8_t)(Q.recording && Q.rec_trk == t);
         v->level[s] = (uint8_t)level_of(t);
+        seq_cells sc; seq_cells_get(&Q, t, first, -1, &sc);   /* (3.4.4: one pass over the events, not two a step) */
         for (int i = 0; i < 16; i++) {
-            int st = first + i; uint8_t f = 0;
+            int st = first + i; uint8_t f = 0; uint32_t b = 1u << i;
             if (st >= steps) f = UC_OUT;
             else {
-                if (seq_step_has(&Q, t, st, -1)) f |= UC_NOTE;
-                int c, r, nl = seq_step_info(&Q, t, st, &c, &r);
-                if (nl) f |= UC_LOCK;
-                if (c != SEQ_ALWAYS) f |= UC_COND;
-                if (r > 1) f |= UC_RAT;
+                if (sc.any & b) f |= UC_NOTE;
+                if (sc.lock & b) f |= UC_LOCK;
+                if (sc.cond & b) f |= UC_COND;
+                if (sc.rat & b) f |= UC_RAT;
                 if (st == at) f |= UC_PLAY;
             }
             v->cells[s][i] = f;
         }
     }
+    audio_yield();
     /* the sound */
     const gb_patch *q = &S.trk[trk].patch;
     v->engine = (uint8_t)(q->engine == ENG_DRUM ? 1 : 0);
@@ -1392,13 +1429,16 @@ COLD static void fill_view(ui_view *v)
             v->page = UI_DRUMS; v->drum_sel = (uint8_t)(last_note & 15);
             int steps = k->pat[k->cur].steps, at = Q.playing ? (int)seq_step_of(&Q, trk) - page * 16 : -1;
             v->drum_at = (int8_t)(at >= 0 && at < 16 ? at : -1);
-            for (int r = 0; r < 16; r++) { uint16_t m = 0; for (int i = 0; i < 16; i++) if (page * 16 + i < steps && seq_step_has(&Q, trk, page * 16 + i, r)) m |= (uint16_t)(1u << i); v->drum_row[r] = m; }
-            /* (3.3.8) the step picked framed, the sound picked's levels as shades and its ratchets as notches */
+            /* (3.4.4) the 16 sounds' rows and the sound picked's hits in one pass over the events (256 passes before:
+             * some milliseconds with a full pattern, the sound's crackle) */
             int n = last_note & 15, vv = 0, rr = 1, has;
+            seq_cells sc; seq_cells_get(&Q, trk, page * 16, n, &sc); (void)steps;
+            for (int r = 0; r < 16; r++) v->drum_row[r] = sc.row[r];
+            /* (3.3.8) the step picked framed, the sound picked's levels as shades and its ratchets as notches */
             if (grid_on()) dg_fix();
             v->drum_cur = (int8_t)(grid_on() && dg_cur / 16 == page ? dg_cur % 16 : -1);
             v->drum_lvl = 0; v->drum_rat = 0;
-            for (int i = 0; i < 16; i++) if (seq_hit_get(&Q, trk, page * 16 + i, n, &vv, &rr)) { v->drum_lvl |= (uint32_t)dg_lvl(vv) << (2 * i); v->drum_rat |= (uint32_t)(rr - 1) << (2 * i); }
+            for (int i = 0; i < 16; i++) if (sc.hit & (1u << i)) { v->drum_lvl |= (uint32_t)dg_lvl(sc.vel[i]) << (2 * i); v->drum_rat |= (uint32_t)(sc.ratn[i] - 1) << (2 * i); }
             has = seq_hit_get(&Q, trk, dg_cur, n, &vv, &rr);
             v->drum_sheet = (uint8_t)dg_sheet;
             if (grid_on() && dg_sheet) {                     /* the hit's sheet: KNOB 1 the row, KNOB 2 its value */
@@ -1814,6 +1854,7 @@ COLD static void fill_view(ui_view *v)
     if (saved_kind && (uint32_t)(now - t_saved) > 2000000u * lsb) { saved_kind = 0; save_key = -1; }
     v->saved = (uint8_t)(saving ? 0 : saved_kind);                  /* (3.3.8) the big SAVED */
     v->info = info[0] && info_live && !v->toast ? info : 0;
+    if (!v->info && !v->toast && v->page == UI_GENERIC && pg == PG_SYS && crash_msg[0]) v->info = crash_msg;   /* (3.4.4) HOME > SYSTEM: the last stop, until a power-off */
     v->saving = (uint8_t)(saving && saving_shown); v->save_pct = saving ? (uint8_t)store_progress() : 0;
 }
 
@@ -1852,7 +1893,7 @@ COLD static int ui_step(void)
         if ((uint32_t)(now - t_pass) < 40000u * lsb) return 0;       /* 25 passes a second at most */
         t_pass = now;
         uint8_t *z = (uint8_t *)&W; for (uint32_t i = 0; i < sizeof W; i++) z[i] = 0;   /* (the padding too) */
-        fill_view(&W);
+        TWP("fill_view", fill_view(&W)); audio_yield();
         if (W.page == UI_SPLASH) {                           /* the start's logo: a picture each pass */
             { uint16_t c[5]; for (int t = 0; t < NTRK; t++) c[POS[t]] = TRK_COL[t]; vis_splash((now - splash_t0) / lsb / 1000u, 0, c);   /* (3.3: the logo alone; the version is in HOME) */ } V = W; gen_drawn = msg_gen; tile_i = 0;
         } else if (W.page == UI_VIS) {                       /* the visualiser: a new picture each pass, in sbuf when free */
@@ -1868,7 +1909,7 @@ COLD static int ui_step(void)
     for (int n = 0; n < 8 && tile_i < NTILES && (uint32_t)(time_ticks() - now) < 250u * lsb; n++) {
         int i = tile_i++, tx = (i % (GFX_W / TILE_W)) * TILE_W, ty = (i / (GFX_W / TILE_W)) * TILE_H;
         gfx_target(tilebuf, tx, ty, TILE_W, TILE_H);
-        ui_draw(&V);
+        TWP("ui_draw(tile)", ui_draw(&V)); audio_yield();
         uint32_t h = gfx_finish(tilebuf, TILE_W * TILE_H);
         if (!tile_sent[i] || h != tile_hash[i]) { tile_hash[i] = h; tile_sent[i] = 1; lcd_tile_start(tx, ty, TILE_W, TILE_H, tilebuf); break; }
     }
@@ -1989,6 +2030,7 @@ COLD static void load_project(int w)
     (void)w;
     dm_live = 0;
     if (sbuf_held()) { say_bad("EDITOR BUSY"); return; }
+    quiet_begin();
     uint32_t n = 0, crc = 0;
     int have = flash_ok && store_proj_find(&proj_at, &n, &crc) == 0;
     proj = 0; safe_hold = 0; proj_used = have ? 1u : 0u;
@@ -2002,6 +2044,7 @@ COLD static void load_project(int w)
         say("NEW PROJECT");
     }
     midi_kept = 1;
+    quiet_end();
 }
 /* what a project file loaded brings beside the sequencer and the sound */
 COLD static void load_after(project_extra *xp)
@@ -2069,7 +2112,12 @@ COLD static void save_project(int shown)
     uint32_t crc, n = proj_measure(&crc);
     if (n > STORE_PMAX) { say_bad("PROJECT TOO BIG"); return; }   /* (cannot be: the largest the sequencer holds fits, tests/store_test.c) */
     if (!shown && crc == saved_crc && n == saved_len) return;     /* nothing changed */
-    if (store_proj_begin(n, crc, 1)) { if (shown) say_bad("SAVE: ERROR"); return; }
+    /* (3.4.3) while it plays, a save that would have to erase the flash (rare: a dozen saves in a row without a stop,
+     * the bank prepared while stopped full) waits for the stop: an erase silences the samples for tens of ms */
+    store_no_erase = Q.playing; int rb = store_proj_begin(n, crc, 1); store_no_erase = 0;
+    if (rb == -3) { save_at_stop = (uint8_t)(1 + shown); if (shown) say_imp("SAVED WHEN YOU STOP"); return; }
+    if (rb) { if (shown) say_bad("SAVE: ERROR"); return; }
+    save_at_stop = 0;
     saving = 1; saving_shown = shown; saving_snd = 0; saved_crc = crc; saved_len = n; saving_len = n;
 }
 /* the save asks for the project's next part (store_step 3): made into sbuf from the project as it is now */
@@ -3170,9 +3218,10 @@ COLD static void leds(void)
     if (!L && (sticky == PG_SONG || sticky == PG_SONG2)) L = 1u << BTN_SAVE;
     if (steps_on_keys() || (!L && sticky == PG_STEPS)) {   /* the page's steps, the playhead */
         uint32_t now = Q.playing ? seq_step_of(&Q, trk) : 0xFFFF;
+        seq_cells sc; seq_cells_get(&Q, trk, page * 16, is_drum(trk) ? last_note : -1, &sc);   /* (3.4.4: one pass, not 16) */
         for (int w = 0; w < 16; w++) {
             int st = page * 16 + w;
-            int on = seq_step_has(&Q, trk, st, is_drum(trk) ? last_note : -1);
+            int on = (sc.hit >> w) & 1;
             if ((uint32_t)st == now) on = !on;
             led_(14 + white_key[w], on); if (!(w & 3)) panel_glow(14 + white_key[w]);
         }
@@ -4489,9 +4538,11 @@ COLD __attribute__((noinline)) static void ui_round(void)
     if (splash_on && ((time_ticks() - splash_t0) / lsb > VIS_SPLASH_MS * 1000u || held_btn || panel_keys() || ek_held || t_input != splash_t0)) {
         splash_on = 0; if (splash_bad) say_bad(splash_say); else if (splash_say) say_imp(splash_say);
     }
-    buttons(); sb_tick(); keys(); notes_advance(); erase_pass(); encoders(); leds();
-    fm6_bank_poll();
-    msg_tick();
+    /* (3.4.3) the sound served between the round's parts when its half is due (audio_yield) */
+    TWP("buttons", buttons()); audio_yield(); TWP("sb_tick", sb_tick()); TWP("keys", keys()); audio_yield();
+    TWP("notes_advance", notes_advance()); TWP("erase_pass", erase_pass()); TWP("encoders", encoders()); audio_yield(); TWP("leds", leds());
+    TWP("fm6_bank_poll", fm6_bank_poll());
+    TWP("msg_tick", msg_tick()); audio_yield();
     {                                               /* the clock in: said when it comes and when it goes */
         static int ext_was;
         int e = ext_on(time_ticks());
@@ -4503,7 +4554,8 @@ COLD __attribute__((noinline)) static void ui_round(void)
         if (ft_us() > 24000000u) ft_close();
         else if ((uint32_t)(now - ft_said) > 400000u * lsb) { ft_said = now; }   /* (4.0: the REC screen shows the take; ft_say no longer called) */
     }
-    if (save_soon && !saving && (uint32_t)(now - t_save_soon) > 1600000u * lsb) { save_soon = 0; save_project(1); }   /* (SAVE + a key) */
+    if (save_soon && !saving && (uint32_t)(now - t_save_soon) > 1600000u * lsb) { save_soon = 0; TWP("save_project(1)", save_project(1)); }
+    if (save_at_stop && !Q.playing && !saving && !sbuf_held()) { int sh = save_at_stop == 2; save_at_stop = 0; save_nocommit = 1; save_project(sh); }   /* (3.4.3: stopped: now) */   /* (SAVE + a key) */
     if (fav_dirty && !saving && !Q.playing && flash_ok && !sbuf_held() && (uint32_t)(now - fav_t) > 1200000u * lsb) { fav_dirty = 0; fav_save(); }   /* (3.2: your favourites, once they rest; 3.4.0: stopped, as the autosave: its erase would cut the sound) */
     /* an editor's transfer left halfway (the page closed, the cable out): dropped, sbuf free again (3.1.1) */
     if (saving && ed_wr.on && ed_wr.kind == 0 && (uint32_t)(now - ed_t_last) > 10000000u * lsb) {   /* (3.3.5) a project halfway */
@@ -4515,7 +4567,7 @@ COLD __attribute__((noinline)) static void ui_round(void)
     }
     /* the autosave: stopped, untouched for 2.5 s, at most every 20 s */
     if (!Q.playing && !saving && !ed_wr.on && (uint32_t)(now - t_input) > 2500000u * lsb && (uint32_t)(now - t_autosave) > 20000000u * lsb) {
-        t_autosave = now; save_project(0);
+        t_autosave = now; TWP("autosave", save_project(0));
     }
     if ((uint32_t)(now - t_pot) > 20000u * lsb) {
         t_pot = now;
@@ -4537,8 +4589,8 @@ COLD __attribute__((noinline)) static void ui_round(void)
         ld_sum = 0; ld_halves = 0; ld_peak = 0;
         if (c1_fail) { c1_fail = 0; say_bad("CORE 2: FAILED"); }
     }
-    panel_dark();
-    ui_step();
+    panel_dark(); audio_yield();
+    TWP("ui_step", ui_step());
 }
 
 #ifdef BOOT_DIAG
@@ -4721,7 +4773,12 @@ COLD static void crumb_report(void)
         char *p = put_s(crash_msg, (sys_reset_bits() & 4u) ? "FROZE IN " : "RESTART IN "); p = put_s(p, WN[crumb.where]);   /* (3.3.3: the watchdog's restart: it had stopped answering) */
         if (crumb.fx >= 1u && crumb.fx <= (uint32_t)PK_N) { p = put_s(p, " · "); p = put_s(p, PK_NAME[crumb.fx - 1u]); }
         uint32_t sec = crumb.blocks / 689u;               /* (689 blocks of 64 a second at 44.1 kHz) */
-        p = put_s(p, " · "); p = sec < 120u ? put_s(put_u(p, sec), " S") : put_s(put_u(p, sec / 60u), " MIN"); *p = 0;
+        p = put_s(p, " · "); p = sec < 120u ? put_s(put_u(p, sec), " S") : put_s(put_u(p, sec / 60u), " MIN");
+        /* (3.4.4) the load and the voices at the last half, the chip's reset cause (its raw bits: 4 the watchdog) */
+        if (crumb.load <= 999u) { p = put_s(p, " · CPU "); p = put_s(put_u(p, crumb.load), "%"); }
+        if (crumb.voices <= 99u) { p = put_s(p, " · "); p = put_s(put_u(p, crumb.voices), " V"); }
+        { uint32_t r = sys_reset_bits() & 0xFFu; static const char HX[] = "0123456789ABCDEF"; p = put_s(p, " · R"); *p++ = HX[r >> 4]; *p++ = HX[r & 15u]; }
+        *p = 0;
     }
 }
 /* the start, up to the sound on: from the flash window (3.3.3: the slot's room; nothing here runs with it off) */
@@ -4736,7 +4793,7 @@ COLD __attribute__((noinline)) static void start(uint32_t arg)
                                                            * starts: at the boot loader's, some FM-1s read the flash and the RAM wrong) */
     stack_mark();
     crumb_report();                                       /* (the last run, if a restart ended it) */
-    crumb.magic = CRUMB_MAGIC; crumb.fx = 0; crumb.blocks = 0; crumb_at(W_NONE);
+    crumb.magic = CRUMB_MAGIC; crumb.fx = 0; crumb.blocks = 0; crumb.load = 1000u; crumb.voices = 100u; crumb_at(W_NONE);
 #ifdef BOOT_DIAG
     lcd_init();
     BOOT_STEP(1);
@@ -4794,53 +4851,139 @@ COLD __attribute__((noinline)) static void start(uint32_t arg)
     sys_wdt_arm();                                        /* (3.3.3: ~4 s without the loop: a restart, which then says where) */
     BOOT_STEP(20);                   /* the USB port from the 2 kHz tick (its audio input's packets) */
 }
+/* ---------------------------------------------------------------- the sound's halves
+ * (3.4.3, Sam: "a crackle each time I save") a half of the sound is due every 5.8 ms; the main loop makes it, then
+ * serves the interface. A job of the interface longer than what the sound leaves of the 5.8 ms (a save made the
+ * project's bytes in one go: 0.3 M instructions, 5.6 M for a large project, tens of ms on the FM-1) let the output play
+ * the last half again: the crackle. audio_yield, called from inside the long jobs (app/project.c project_yield, the
+ * interface's round between its parts), makes the half when it is due. A load (the sound replaced under it) is
+ * served with silence instead (ay_quiet), after a half that fades out */
+static uint32_t half_ticks, ay_calm, ay_over, ay_t_over; static int overload_say, ay_busy;
+static volatile uint8_t ay_quiet;                          /* 1: the next half fades out, then 2: the halves silent */
+static void audio_half(void)
+{
+    ay_busy = 1;
+    panel_dark();
+    /* (3.3.8) a page of a save being written: waited for (well under a millisecond), so that the samples and the
+     * kits, read from the flash, are not silent for this half (a stutter while it played) */
+    if (!flash_xip_on() && saving && !store_erasing()) { uint32_t tw = time_ticks(); while (!flash_xip_on() && (uint32_t)(time_ticks() - tw) < 2000u * lsb) flash_busy(); }   /* (3.4.3: 2 ms, a slower part's page: 1.2 before) */
+#ifdef HOST
+    if (!flash_xip_on()) dark_halves++;
+    ay_halves++;
+#endif
+    uint32_t t0 = time_ticks();
+    t_half = t0;
+#ifdef HOST
+    if (ay_quiet == 2) tw_quiet_half = 1;
+#endif
+    int32_t *h = audio_free_half();
+    int pl = audio_playing_half();
+    if (ay_quiet == 2) {                                 /* (a load: the sound being replaced is not played) */
+        for (uint32_t i = 0; i < 2u * HALF_FRAMES; i++) h[i] = 0;
+        audio_half_done(); ay_busy = 0;
+#ifdef HOST
+        ay_last = twp_ns(); ay_last_job = twp_cur;
+#endif
+        return;
+    }
+#ifdef HOST
+    uint64_t twp_h = twp_ns();
+#endif
+    for (uint32_t b = 0; b < HALF_FRAMES / GB_BLOCK; b++) {
+        if (b) midi_poll();                          /* (the wires read between the blocks too) */
+        blk_t = t0 + b * blk_ticks;
+        render_block(h + b * GB_BLOCK * 2u);
+    }
+#ifdef HOST
+    twp_add("render(half)", twp_ns() - twp_h);
+#endif
+    if (ay_quiet == 1) {                                 /* (the half before a load: down to nothing) */
+        for (uint32_t i = 0; i < HALF_FRAMES; i++) { int32_t g = (int32_t)(HALF_FRAMES - 1u - i); h[2 * i] = (int32_t)((int64_t)h[2 * i] * g / HALF_FRAMES); h[2 * i + 1] = (int32_t)((int64_t)h[2 * i + 1] * g / HALF_FRAMES); }
+        ay_quiet = 2;
+    }
+    if (audio_playing_half() != pl) late++;
+    audio_half_done();
+    uint32_t pct = (time_ticks() - t0) * 100u / half_ticks;
+    crumb.load = pct > 999u ? 999u : pct; crumb.voices = (uint32_t)snd_voices(&S);   /* (3.4.4: told after a restart) */
+    ld_sum += pct; ld_halves++; if (pct > ld_peak) ld_peak = pct;
+    if (pct > 85u) {                                 /* the load guard (G14) */
+        int n = snd_voices(&S), floor = ay_over >= 8u ? 4 : 8;   /* (3.3: long over: down to 4 voices) */
+        snd_shed(&S);
+        S.voice_cap = n - 1 > floor ? n - 1 : floor;
+        ay_calm = 0;
+        /* (3.4.1) said with the interface, not here: this runs while a save has the window off, and say_bad is
+         * the window's (3.4.0: a heavy sound saved while it played froze the FM-1) */
+        if (pct > 100u && ++ay_over == 8u && (uint32_t)(t0 - ay_t_over) > 5000000u * lsb) { ay_t_over = t0; overload_say = 1; }
+    } else if (S.voice_cap && pct < 55u && ++ay_calm >= 64u) {
+        ay_calm = 0;
+        if (++S.voice_cap >= GB_NVOICE) S.voice_cap = 0;
+    }
+    if (pct <= 100u) ay_over = 0;
+    ay_busy = 0;
+#ifdef HOST
+    ay_last = twp_ns(); ay_last_job = twp_cur;           /* (the half's own making: not a gap) */
+#endif
+}
+/* the half made now if it is due (from the interface's long jobs; never from inside a half) */
+static void audio_yield(void)
+{
+#ifdef HOST
+    static int off = -1; if (off < 0) off = getenv("TWIN_NOYIELD") != 0;   /* (the twin: as before 3.4.3, to compare) */
+    if (off) return;
+    ay_mark();
+#endif
+    if (!ay_busy && audio_half_free()) audio_half();
+}
+/* while a job replaces the sound: the half due given silence, nothing rendered (a shallow stack: called from deep in
+ * the project's reader) */
+static void audio_quiet(void)
+{
+#ifdef HOST
+    ay_mark();
+#endif
+    if (ay_busy || !audio_half_free()) return;
+    t_half = time_ticks();
+#ifdef HOST
+    tw_quiet_half = 1;
+#endif
+    int32_t *h = audio_free_half();
+    for (uint32_t i = 0; i < 2u * HALF_FRAMES; i++) h[i] = 0;
+    audio_half_done();
+#ifdef HOST
+    ay_last = twp_ns(); ay_last_job = twp_cur;
+#endif
+}
+/* (3.4.3) a job that replaces the sound (a project opened, a new one): the half playing faded out first, the halves
+ * silent while it runs (audio_quiet serves them), then the sound back */
+static uint8_t quiet_n;
+COLD static void quiet_begin(void)
+{
+    if (quiet_n++ || !half_ticks) return;               /* (one within another: the first; the start: no sound yet) */
+    ay_quiet = 1;
+    uint32_t t0 = time_ticks();
+    while (ay_quiet == 1 && (uint32_t)(time_ticks() - t0) < 20000u * lsb) audio_yield();   /* (its half, faded) */
+    ay_quiet = 2; project_yield = audio_quiet;
+}
+COLD static void quiet_end(void) { if (quiet_n && !--quiet_n) { ay_quiet = 0; project_yield = audio_yield; } }
 int app_main(uint32_t arg)
 {
     start(arg);
-    const uint32_t half_ticks = (uint32_t)((uint64_t)HALF_FRAMES * AUDIO_RATE_DEN * lsb / (AUDIO_RATE_NUM / 1000000u));
+    half_ticks = (uint32_t)((uint64_t)HALF_FRAMES * AUDIO_RATE_DEN * lsb / (AUDIO_RATE_NUM / 1000000u));
     blk_ticks = half_ticks / (HALF_FRAMES / GB_BLOCK);
     t_pot = time_ticks(); t_stat = t_pot; t_autosave = t_pot;
-    uint32_t calm = 0, over = 0, t_over = time_ticks() - 6000000u * lsb; int overload_say = 0;
+    ay_t_over = time_ticks() - 6000000u * lsb;
+    project_yield = audio_yield; store_yield = audio_yield;
     t_input = t_pot; t_midi_play = t_pot; if (splash_on) splash_t0 = t_input;   /* (the logo from here; a knob turned: t_input moves) */
     uint32_t t_wdt = time_ticks();
     for (;;) {
         if ((uint32_t)(time_ticks() - t_wdt) > 100000u * lsb) { t_wdt = time_ticks(); sys_wdt_feed(); }   /* (every 0.1 s) */
         crumb_at(W_MIDI);
         midi_poll();
-        if (audio_half_free()) {
-            panel_dark();
-            /* (3.3.8) a page of a save being written: waited for (well under a millisecond), so that the samples and the
-             * kits, read from the flash, are not silent for this half (a stutter while it played) */
-            if (!flash_xip_on() && saving && !store_erasing()) { uint32_t tw = time_ticks(); while (!flash_xip_on() && (uint32_t)(time_ticks() - tw) < 1200u * lsb) flash_busy(); }
 #ifdef HOST
-            if (!flash_xip_on()) dark_halves++;
+        ay_mark();
 #endif
-            uint32_t t0 = time_ticks();
-            t_half = t0;
-            int32_t *h = audio_free_half();
-            int pl = audio_playing_half();
-            for (uint32_t b = 0; b < HALF_FRAMES / GB_BLOCK; b++) {
-                if (b) midi_poll();                          /* (the wires read between the blocks too) */
-                blk_t = t0 + b * blk_ticks;
-                render_block(h + b * GB_BLOCK * 2u);
-            }
-            if (audio_playing_half() != pl) late++;
-            audio_half_done();
-            uint32_t pct = (time_ticks() - t0) * 100u / half_ticks;
-            ld_sum += pct; ld_halves++; if (pct > ld_peak) ld_peak = pct;
-            if (pct > 85u) {                                 /* the load guard (G14) */
-                int n = snd_voices(&S), floor = over >= 8u ? 4 : 8;   /* (3.3: long over: down to 4 voices) */
-                snd_shed(&S);
-                S.voice_cap = n - 1 > floor ? n - 1 : floor;
-                calm = 0;
-                /* (3.4.1) said with the interface, not here: this runs while a save has the window off, and say_bad is
-                 * the window's (3.4.0: a heavy sound saved while it played froze the FM-1) */
-                if (pct > 100u && ++over == 8u && (uint32_t)(t0 - t_over) > 5000000u * lsb) { t_over = t0; overload_say = 1; }
-            } else if (S.voice_cap && pct < 55u && ++calm >= 64u) {
-                calm = 0;
-                if (++S.voice_cap >= GB_NVOICE) S.voice_cap = 0;
-            }
-            if (pct <= 100u) over = 0;
+        if (audio_half_free()) {
+            audio_half();
             /* 3.3: the panel and the screen are served between the halves; a sound that takes all the time never
              * leaves them any (the screen stood still, the buttons did nothing: the FM-1 seemed frozen). Past
              * 60 ms without them, they have their turn anyway: a gap in the sound, but the hands keep control */
@@ -4852,10 +4995,13 @@ int app_main(uint32_t arg)
         }
         if (saving && (store_erasing() || (uint32_t)(time_ticks() - t_half) < half_ticks - 1300u * lsb)) {   /* a save: one flash operation at a time, never a wait; (3.3.8) a page only with 1.3 ms left before the next half */
             crumb_at(W_SAVE);
-            int r = store_step();
-            if (r == 3) { if (ed_wr.on && ed_wr.kind == 0) ed_proj_pump(); else proj_feed(); }   /* (the flash idle, the window on: its next part) */
+            int r; TWP("store_step", r = store_step());
+            if (r == 3) { if (ed_wr.on && ed_wr.kind == 0) TWP("ed_proj_pump", ed_proj_pump()); else TWP("proj_feed", proj_feed()); }   /* (the flash idle, the window on: its next part) */
             else if (r == 2 || r < 0) { flash_wait_idle(); saving = 0; save_said = r == 2 ? 1 : r == -2 ? -2 : -1; }
         }
+#ifdef HOST
+        tw_loop_top();
+#endif
         if (!flash_xip_on()) {                              /* the flash at work: the window is off, only RAM code */
             crumb_at(W_FLASH);
             panel_step();
@@ -4864,16 +5010,16 @@ int app_main(uint32_t arg)
             continue;
         }
         if (overload_say) { overload_say = 0; say_bad("CPU OVERLOAD: VOICES CUT"); }   /* (the window on: 3.4.1) */
-        slice_scan_poll();                                  /* (SLICE: a user slot just written, scanned a part at a time) */
+        TWP("slice_scan_poll", slice_scan_poll());                                  /* (SLICE: a user slot just written, scanned a part at a time) */
         if (save_said) {
             /* (taken and cleared first: what follows may start the next flash job, its own kind set: 3.1.1, the
              * sample's header was written as an autosave and the editor never answered) */
             int said = save_said, snd = saving_snd, eslot = ed_save_slot;
             save_said = 0; saving_snd = 0; ed_save_slot = -1;
-            if (snd == 3) ed_job_done(said > 0);
+            if (snd == 3) TWP("ed_job_done", ed_job_done(said > 0));
             else if (said > 0 && snd) say_imp(snd == 4 ? "FAVOURITES KEPT" : "USER SOUNDS SAVED");
             else if (eslot >= 0) {                       /* a project from the editor: opened once written */
-                if (said > 0) { load_project(0); say_imp("PROJECT RECEIVED"); } else say_bad("PROJECT NOT RECEIVED");
+                if (said > 0) { TWP("load_project(editor)", load_project(0)); say_imp("PROJECT RECEIVED"); } else say_bad("PROJECT NOT RECEIVED");
             }
             else if (said > 0) {                         /* (said each time, the autosave's too: the player sees it is kept) */
                 proj_used = 1; save_retry = 0;
@@ -4886,7 +5032,7 @@ int app_main(uint32_t arg)
             else { saved_crc = 0; save_retry = 0; say_bad("SAVE FAILED"); saved_kind = 2; t_saved = time_ticks(); }
         }
         crumb_at(W_SCREEN);
-        if (panel_step()) { led_dwell(); panel_dark(); ui_round(); }   /* (3.2: the frame's last column lit as long as the others) */
+        if (panel_step()) { led_dwell(); panel_dark(); TWP("ui_round", ui_round()); }   /* (3.2: the frame's last column lit as long as the others) */
         else led_dwell();
         t_ui = time_ticks();
         /* (3.3.8) stopped, nobody touching it for 2.5 s, no flash work: the next save's bank erased beforehand, a

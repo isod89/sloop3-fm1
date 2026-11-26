@@ -51,11 +51,19 @@ for m in re.finditer(r"\]\s+(\S+)\s+PROGBITS\s+([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9
 # the engines' table, the sequencer's hooks, the store's flash steps); any other is listed, its targets unknown
 ENG = sorted(f for f in taken if re.search(r"_(render|start|release|block|spread|stop|tick|on|off)$", f))
 FAM = {"irq_tick": ["tick"], "cpu1_main": ["job_voices"],
-       "seq_play": ["sq_on", "sq_off", "sq_locks"], "play_range": ["sq_on", "sq_off", "sq_locks"]}
+       "seq_play": ["sq_on", "sq_off", "sq_locks"], "play_range": ["sq_on", "sq_off", "sq_locks"],
+       "seq_advance_by": ["sq_switched"]}                       # (3.4.2: a pattern changed, its sound before its notes)
+# (3.4.3) the project's writer and reader serve the sound from inside (app/project.c project_yield)
+for f in ("ev_pack", "save_body", "pwhole"): FAM[f] = ["audio_yield"]
+for f in ("ev_unpack", "load_body"): FAM[f] = ["audio_quiet"]   # (a load: the halves given silence, fw/main.c quiet_begin)
 for f in ("snd_render_voices", "release_voice", "snd_note_off", "voice_go", "mono_play", "start_note", "lofi_start",
           "tracks_tick"): FAM[f] = ENG
 for f in ("store_step", "store_proj_prep", "area_good", "blank4k", "hdr_read", "phdr", "pscan"):
     FAM[f] = [g for g in F if g.startswith("flash_")]
+FAM = {k: v for k, v in FAM.items()}
+for f in list(F):                                      # (a name the compiler gave a suffix: .constprop.0, .part.0)
+    b = f.split(".")[0]
+    if b != f and b in FAM and f not in FAM: FAM[f] = FAM[b]
 unk = sorted(f for f in F if F[f]["ind"] and f not in FAM)
 memo, onstack, recur = {}, set(), set()
 def depth(f, ind_ok=True):
@@ -77,7 +85,7 @@ def depth(f, ind_ok=True):
     return memo[f]
 
 # (the rooms: fw/ram.ld's .stack, 512 bytes for the interrupts (ssp), the rest the main stack; hal/fm1/cpu1_entry.S)
-ROOTS = [("app_main", "core 0, main stack", 0x1A00), ("irq_tick", "core 0, the tick's interrupt (+28 its entry)", 0x200),
+ROOTS = [("app_main", "core 0, main stack", 0x1C00), ("irq_tick", "core 0, the tick's interrupt (+28 its entry)", 0x200),
          ("job_voices", "core 2", 6144)]
 bad = 0
 for r, what, room in ROOTS:
