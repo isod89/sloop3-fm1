@@ -423,6 +423,9 @@ SEQ_COLD int seq_step_get(const seq_t *s, int trk, int step, int *note, int *vel
     }
     return 0;
 }
+/* a nudge in ticks as the knobs show it, in 64ths of a step, rounded to the nearest: a 64th is 1.5 ticks, so
+ * read back truncated, a click's 1 or 4 ticks gave 0 or 2 again and the NUDGE knob never moved */
+SEQ_COLD int seq_nudge64(int ticks) { return (ticks * 64 + (ticks >= 0 ? SEQ_TPS / 2 : -SEQ_TPS / 2)) / SEQ_TPS; }
 SEQ_COLD void seq_step_note(seq_t *s, int trk, int step, int delta)
 {
     seq_pat *p = cur(s, trk);

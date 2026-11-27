@@ -341,6 +341,19 @@ static void sloop_test(void)
     seq_play(&S, 1); nlog = 0; run_to(SEQ_BAR + 1);
     int at = -1; for (int i = 0; i < nlog; i++) if (log_[i].on && log_[i].note == 51) { at = (int)log_[i].tick; break; }
     CHECK(at >= 4 * SEQ_TPS - 20 && at < 4 * SEQ_TPS - 20 + 8, "a nudged step played at %d", at);
+    /* the NUDGE knob, a click at a time as fw/main.c turns it: every 64th reached, both ways */
+    for (int dir = 1; dir >= -1; dir -= 2) {
+        reset(120.0f); seq_step_toggle(&S, 1, 4, 48, 100);
+        int ok = 1, last = 0;
+        for (int c = 0; c < 40 && ok; c++) {
+            int nd = 0; seq_step_get(&S, 1, 4, 0, 0, &nd);
+            int n64 = seq_nudge64(nd) + dir; n64 = n64 < -32 ? -32 : n64 > 31 ? 31 : n64;
+            seq_step_nudge(&S, 1, 4, n64 * SEQ_TPS / 64);
+            seq_step_get(&S, 1, 4, 0, 0, &nd); last = seq_nudge64(nd);
+            if (last != dir * (c < 31 ? c + 1 : 31)) ok = 0;
+        }
+        CHECK(ok, "NUDGE a click at a time (%+d): stuck at %d", dir, last);
+    }
     /* swing: the second step of each pair late by half a step at 100 */
     reset(120.0f);
     for (int st = 0; st < 4; st++) seq_step_toggle(&S, 2, st, 60, 100);

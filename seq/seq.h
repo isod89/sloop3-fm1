@@ -163,6 +163,7 @@ int seq_step_get(const seq_t *s, int trk, int step, int *note, int *vel, int *nu
 void seq_step_note(seq_t *s, int trk, int step, int delta);   /* every note of the step, semitones */
 void seq_step_vel(seq_t *s, int trk, int step, int vel);
 void seq_step_nudge(seq_t *s, int trk, int step, int nudge);  /* off the grid, in ticks (-47 .. +47) */
+int seq_nudge64(int ticks);                                   /* a nudge in ticks, as the nearest 64th of a step (the knobs') */
 void seq_set_swing(seq_t *s, int trk, int swing);             /* trk < 0: the global swing */
 void seq_shift(seq_t *s, int trk, int dir);                   /* every step one later (dir > 0) / earlier */
 void seq_resize(seq_t *s, int trk, int dir);                  /* x2 (a copy after itself) / half */

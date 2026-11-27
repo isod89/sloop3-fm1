@@ -1414,7 +1414,7 @@ COLD static void fill_view(ui_view *v)
                     knob(v, 1, "LEVEL", vel < 50 ? "GHOST" : vel < 85 ? "SOFT" : vel < 115 ? "NORM" : "HARD", vel * 100 / 127, 0);
                     p = put_s(b, "X"); p = put_u(p, (uint32_t)r); *p = 0; knob(v, 2, "RATCH", b, (r - 1) * 33, 0);
                 }
-                int n64 = nud * 64 / SEQ_TPS; *put_i(b, n64) = 0; knob(v, 3, "NUDGE", b, 50 + n64 * 50 / 32, 0);
+                int n64 = seq_nudge64(nud); *put_i(b, n64) = 0; knob(v, 3, "NUDGE", b, 50 + n64 * 50 / 32, 0);
             } else {
             note_name(b, trk, note); knob(v, 0, is_drum(trk) ? "SOUND" : "NOTE", b, note * 100 / 127, 0);
             int fl = seq_step_flags(&Q, trk, hold_step);
@@ -1423,7 +1423,7 @@ COLD static void fill_view(ui_view *v)
             else knob_n(v, 1, "VEL", vel, vel * 100 / 127);
             if (fl & SEQ_SLIDE) knob(v, 2, "RATCH", "SLIDE", 0, 1);
             else { p = put_s(b, "X"); p = put_u(p, (uint32_t)r); *p = 0; knob(v, 2, "RATCH", b, (r - 1) * 33, 0); }
-            int n64 = nud * 64 / SEQ_TPS; *put_i(b, n64) = 0; knob(v, 3, "NUDGE", b, 50 + n64 * 50 / 32, 0);
+            int n64 = seq_nudge64(nud); *put_i(b, n64) = 0; knob(v, 3, "NUDGE", b, 50 + n64 * 50 / 32, 0);
             }
         } else if (layer == BTN_SEQ && !(L & (1u << BTN_SEQ)) && is_drum(trk)) {   /* DRUMS: the kit's grid */
             v->page = UI_DRUMS; v->drum_sel = (uint8_t)(last_note & 15);
@@ -1446,7 +1446,7 @@ COLD static void fill_view(ui_view *v)
                 knob(v, 0, "LINE", DG_ROW[dg_row], dg_row * 20, 0);
                 if (!has) knob(v, 1, DG_ROW[dg_row], "--", -1, 0);
                 else if (dg_row == 0) { p = put_s(b, "X"); p = put_u(p, (uint32_t)rr); *p = 0; knob(v, 1, "RATCHET", b, (rr - 1) * 33, 0); }
-                else if (dg_row == 1) { int nd = 0; seq_step_get(&Q, trk, dg_cur, 0, 0, &nd); int n64 = nd * 64 / SEQ_TPS; *put_i(b, n64) = 0; knob(v, 1, "NUDGE", b, 50 + n64 * 50 / 32, 0); }
+                else if (dg_row == 1) { int nd = 0; seq_step_get(&Q, trk, dg_cur, 0, 0, &nd); int n64 = seq_nudge64(nd); *put_i(b, n64) = 0; knob(v, 1, "NUDGE", b, 50 + n64 * 50 / 32, 0); }
                 else if (dg_row == 2) { int c = 0; seq_step_info(&Q, trk, dg_cur, &c, 0); knob(v, 1, "FILL", c == SEQ_FILL ? "FILL" : c == SEQ_NOFILL ? "NO FILL" : "NORMAL", c == SEQ_FILL ? 50 : c == SEQ_NOFILL ? 100 : 0, 0); }
                 else if (dg_row == 3) { *put_u(b, (uint32_t)dg_cur + 1u) = 0; knob(v, 1, "STEP", b, dg_cur * 100 / (steps > 1 ? steps - 1 : 1), 0); }
                 else knob(v, 1, DG_ROW[dg_row], "OCT+", -1, 1);
@@ -1626,7 +1626,7 @@ COLD static void fill_view(ui_view *v)
                 knob(v, 0, "LINE", NE_ROW[ne_row], ne_row * 20, 0);
                 if (sel < 0) knob(v, 1, NE_ROW[ne_row], "--", -1, 0);
                 else if (ne_row == 0) { int sl = seq_step_flags(&Q, trk, ne_step) & SEQ_SLIDE; knob(v, 1, "SLIDE", sl ? "ON" : "OFF", sl ? 100 : 0, 0); }
-                else if (ne_row == 1) { int nd = 0; seq_step_get(&Q, trk, ne_step, 0, 0, &nd); int n64 = nd * 64 / SEQ_TPS; *put_i(b, n64) = 0; knob(v, 1, "NUDGE", b, 50 + n64 * 50 / 32, 0); }
+                else if (ne_row == 1) { int nd = 0; seq_step_get(&Q, trk, ne_step, 0, 0, &nd); int n64 = seq_nudge64(nd); *put_i(b, n64) = 0; knob(v, 1, "NUDGE", b, 50 + n64 * 50 / 32, 0); }
                 else if (ne_row == 2) { int c = 0; seq_step_info(&Q, trk, ne_step, &c, 0); knob(v, 1, "FILL", c == SEQ_FILL ? "FILL" : c == SEQ_NOFILL ? "NO FILL" : "NORMAL", c == SEQ_FILL ? 50 : c == SEQ_NOFILL ? 100 : 0, 0); }
                 else if (ne_row == 3) { *put_u(b, (uint32_t)ne_step + 1u) = 0; knob(v, 1, "STEP", b, ne_step * 100 / (pp->steps > 1 ? pp->steps - 1 : 1), 0); }
                 else knob(v, 1, NE_ROW[ne_row], "OCT+", -1, 1);
@@ -4081,7 +4081,7 @@ COLD static void encoders(void)
                 }
                 else if (kn == 3) {
                     int nd = 0; seq_step_get(&Q, trk, st, 0, 0, &nd);
-                    int n64 = nd * 64 / SEQ_TPS + d; n64 = n64 < -32 ? -32 : n64 > 31 ? 31 : n64;
+                    int n64 = seq_nudge64(nd) + d; n64 = n64 < -32 ? -32 : n64 > 31 ? 31 : n64;
                     seq_step_nudge(&Q, trk, st, n64 * SEQ_TPS / 64);
                 }
             }
@@ -4185,7 +4185,7 @@ COLD static void encoders(void)
                 if (dg_row == 0) seq_hit_set(&Q, trk, dg_cur, n, -1, r + d);
                 else if (dg_row == 1) {
                     int nd = 0; seq_step_get(&Q, trk, dg_cur, 0, 0, &nd);
-                    int n64 = nd * 64 / SEQ_TPS + d; n64 = n64 < -32 ? -32 : n64 > 31 ? 31 : n64;
+                    int n64 = seq_nudge64(nd) + d; n64 = n64 < -32 ? -32 : n64 > 31 ? 31 : n64;
                     seq_step_nudge(&Q, trk, dg_cur, n64 * SEQ_TPS / 64);
                 } else if (dg_row == 2) {
                     static const uint8_t FC[3] = { SEQ_ALWAYS, SEQ_FILL, SEQ_NOFILL };
@@ -4295,7 +4295,7 @@ COLD static void encoders(void)
                 if (ne_row == 0) seq_step_flag(&Q, trk, ne_step, SEQ_SLIDE, d > 0);
                 else if (ne_row == 1) {
                     int nd = 0; seq_step_get(&Q, trk, ne_step, 0, 0, &nd);
-                    int n64 = nd * 64 / SEQ_TPS + d; n64 = n64 < -32 ? -32 : n64 > 31 ? 31 : n64;
+                    int n64 = seq_nudge64(nd) + d; n64 = n64 < -32 ? -32 : n64 > 31 ? 31 : n64;
                     seq_step_nudge(&Q, trk, ne_step, n64 * SEQ_TPS / 64);
                 } else if (ne_row == 2) {
                     static const uint8_t FC[3] = { SEQ_ALWAYS, SEQ_FILL, SEQ_NOFILL };
